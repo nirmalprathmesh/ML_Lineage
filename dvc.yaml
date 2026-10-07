@@ -1,0 +1,51 @@
+stages:
+  prepare:
+    cmd: .venv\Scripts\python.exe src/prepare.py
+    deps:
+      - src/prepare.py
+      - params.yaml
+    params:
+      - prepare.raw_data_path
+      - prepare.prepared_train_path
+      - prepare.prepared_test_path
+      - prepare.test_size
+      - prepare.random_state
+    outs:
+      - data/raw/wine_dataset.csv
+      - data/prepared/train.csv
+      - data/prepared/test.csv
+
+  featurize:
+    cmd: .venv\Scripts\python.exe src/featurize.py
+    deps:
+      - src/featurize.py
+      - data/prepared/train.csv
+      - data/prepared/test.csv
+      - params.yaml
+    outs:
+      - data/features/train_features.csv
+      - data/features/test_features.csv
+
+  train:
+    cmd: .venv\Scripts\python.exe src/train.py
+    deps:
+      - src/train.py
+      - data/features/train_features.csv
+      - params.yaml
+    params:
+      - train.n_estimators
+      - train.max_depth
+      - train.random_state
+    outs:
+      - models/model.pkl
+
+  evaluate:
+    cmd: .venv\Scripts\python.exe src/evaluate.py
+    deps:
+      - src/evaluate.py
+      - models/model.pkl
+      - data/features/test_features.csv
+      - params.yaml
+    metrics:
+      - metrics.json:
+          cache: false

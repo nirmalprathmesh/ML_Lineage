@@ -1,0 +1,110 @@
+schema: '2.0'
+stages:
+  prepare:
+    cmd: .venv\Scripts\python.exe src/prepare.py
+    deps:
+    - path: params.yaml
+      hash: md5
+      md5: 65f92239f7bbf28930f55915625e71ab
+      size: 449
+    - path: src/prepare.py
+      hash: md5
+      md5: 02867a357d94c744d1ca3c69b3f346e9
+      size: 1351
+    params:
+      params.yaml:
+        prepare.prepared_test_path: data/prepared/test.csv
+        prepare.prepared_train_path: data/prepared/train.csv
+        prepare.random_state: 42
+        prepare.raw_data_path: data/raw/wine_dataset.csv
+        prepare.test_size: 0.2
+    outs:
+    - path: data/prepared/test.csv
+      hash: md5
+      md5: badbbc14804281e532b779f157cf060c
+      size: 2652
+    - path: data/prepared/train.csv
+      hash: md5
+      md5: 6ed6847e979521e8407743c1727d81d3
+      size: 9966
+    - path: data/raw/wine_dataset.csv
+      hash: md5
+      md5: e6dccd29b15c08636f50bd2c0fd80a6a
+      size: 12440
+  featurize:
+    cmd: .venv\Scripts\python.exe src/featurize.py
+    deps:
+    - path: data/prepared/test.csv
+      hash: md5
+      md5: badbbc14804281e532b779f157cf060c
+      size: 2652
+    - path: data/prepared/train.csv
+      hash: md5
+      md5: 6ed6847e979521e8407743c1727d81d3
+      size: 9966
+    - path: params.yaml
+      hash: md5
+      md5: 65f92239f7bbf28930f55915625e71ab
+      size: 449
+    - path: src/featurize.py
+      hash: md5
+      md5: ded2776c4f55cab1194a3ddc5e82347b
+      size: 1660
+    outs:
+    - path: data/features/test_features.csv
+      hash: md5
+      md5: ff08f091b7a0d4ecd232d4c803700580
+      size: 9450
+    - path: data/features/train_features.csv
+      hash: md5
+      md5: 5c82ac938b9886f441e79f47938a02b1
+      size: 36736
+  train:
+    cmd: .venv\Scripts\python.exe src/train.py
+    deps:
+    - path: data/features/train_features.csv
+      hash: md5
+      md5: 5c82ac938b9886f441e79f47938a02b1
+      size: 36736
+    - path: params.yaml
+      hash: md5
+      md5: 65f92239f7bbf28930f55915625e71ab
+      size: 449
+    - path: src/train.py
+      hash: md5
+      md5: b6a371d97e60464f7ddb7677f86ad6f4
+      size: 1186
+    params:
+      params.yaml:
+        train.max_depth: 5
+        train.n_estimators: 100
+        train.random_state: 42
+    outs:
+    - path: models/model.pkl
+      hash: md5
+      md5: 365e5bc3b70e5f9a2e32a837088e35b8
+      size: 206529
+  evaluate:
+    cmd: .venv\Scripts\python.exe src/evaluate.py
+    deps:
+    - path: data/features/test_features.csv
+      hash: md5
+      md5: ff08f091b7a0d4ecd232d4c803700580
+      size: 9450
+    - path: models/model.pkl
+      hash: md5
+      md5: 365e5bc3b70e5f9a2e32a837088e35b8
+      size: 206529
+    - path: params.yaml
+      hash: md5
+      md5: 65f92239f7bbf28930f55915625e71ab
+      size: 449
+    - path: src/evaluate.py
+      hash: md5
+      md5: 257ab874399e7f2d778fccfaa7dd1719
+      size: 1448
+    outs:
+    - path: metrics.json
+      hash: md5
+      md5: aed4c6216573de4906939205915c8bca
+      size: 90

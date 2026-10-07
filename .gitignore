@@ -3,6 +3,10 @@
 __pycache__/
 *.pyc
 
+# Data and Model binaries tracked by DVC (do not commit raw files to Git)
+/data/
+/models/
+
 # MLflow experiment tracking storage (do not commit to Git)
 mlruns/
 .mlflow/
