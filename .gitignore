@@ -1,0 +1,12 @@
+# Python virtual environments & bytecode
+.venv/
+__pycache__/
+*.pyc
+
+# MLflow experiment tracking storage (do not commit to Git)
+mlruns/
+.mlflow/
+
+# OS specific files
+.DS_Store
+Thumbs.db

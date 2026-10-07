@@ -1,0 +1,19 @@
+prepare:
+  raw_data_path: "data/raw/wine_dataset.csv"
+  prepared_train_path: "data/prepared/train.csv"
+  prepared_test_path: "data/prepared/test.csv"
+  test_size: 0.2
+  random_state: 42
+
+featurize:
+  features_train_path: "data/features/train_features.csv"
+  features_test_path: "data/features/test_features.csv"
+
+train:
+  model_path: "models/model.pkl"
+  n_estimators: 100
+  max_depth: 5
+  random_state: 42
+
+evaluate:
+  metrics_path: "metrics.json"
