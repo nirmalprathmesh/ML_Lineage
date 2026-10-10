@@ -52,3 +52,13 @@ stages:
     metrics:
       - metrics.json:
           cache: false
+
+  log_experiment:
+    cmd: python src/log_experiment.py
+    deps:
+      - src/log_experiment.py
+      - metrics.json
+      - models/model.pkl
+      - models/scaler.pkl
+      - params.yaml
+    always_changed: true

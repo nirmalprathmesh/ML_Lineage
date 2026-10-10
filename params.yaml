@@ -18,3 +18,7 @@ train:
 
 evaluate:
   metrics_path: "metrics.json"
+
+mlflow:
+  experiment_name: "ML_Lineage_Experiments"
+  tracking_uri: "sqlite:///mlflow.db"
