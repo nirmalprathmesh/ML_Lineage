@@ -1,6 +1,6 @@
 stages:
   prepare:
-    cmd: .venv\Scripts\python.exe src/prepare.py
+    cmd: python src/prepare.py
     deps:
       - src/prepare.py
       - params.yaml
@@ -16,18 +16,21 @@ stages:
       - data/prepared/test.csv
 
   featurize:
-    cmd: .venv\Scripts\python.exe src/featurize.py
+    cmd: python src/featurize.py
     deps:
       - src/featurize.py
       - data/prepared/train.csv
       - data/prepared/test.csv
       - params.yaml
+    params:
+      - featurize.scaler_path
     outs:
       - data/features/train_features.csv
       - data/features/test_features.csv
+      - models/scaler.pkl
 
   train:
-    cmd: .venv\Scripts\python.exe src/train.py
+    cmd: python src/train.py
     deps:
       - src/train.py
       - data/features/train_features.csv
@@ -40,7 +43,7 @@ stages:
       - models/model.pkl
 
   evaluate:
-    cmd: .venv\Scripts\python.exe src/evaluate.py
+    cmd: python src/evaluate.py
     deps:
       - src/evaluate.py
       - models/model.pkl

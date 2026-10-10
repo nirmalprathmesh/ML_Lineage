@@ -1,12 +1,12 @@
 schema: '2.0'
 stages:
   prepare:
-    cmd: .venv\Scripts\python.exe src/prepare.py
+    cmd: python src/prepare.py
     deps:
     - path: params.yaml
       hash: md5
-      md5: 65f92239f7bbf28930f55915625e71ab
-      size: 449
+      md5: 2e2adef9b724244fb0e55da05320f6ad
+      size: 484
     - path: src/prepare.py
       hash: md5
       md5: 02867a357d94c744d1ca3c69b3f346e9
@@ -32,7 +32,7 @@ stages:
       md5: e6dccd29b15c08636f50bd2c0fd80a6a
       size: 12440
   featurize:
-    cmd: .venv\Scripts\python.exe src/featurize.py
+    cmd: python src/featurize.py
     deps:
     - path: data/prepared/test.csv
       hash: md5
@@ -44,12 +44,15 @@ stages:
       size: 9966
     - path: params.yaml
       hash: md5
-      md5: 65f92239f7bbf28930f55915625e71ab
-      size: 449
+      md5: 2e2adef9b724244fb0e55da05320f6ad
+      size: 484
     - path: src/featurize.py
       hash: md5
-      md5: ded2776c4f55cab1194a3ddc5e82347b
-      size: 1660
+      md5: c3b374b551684ae39896288388be83ec
+      size: 1999
+    params:
+      params.yaml:
+        featurize.scaler_path: models/scaler.pkl
     outs:
     - path: data/features/test_features.csv
       hash: md5
@@ -59,8 +62,12 @@ stages:
       hash: md5
       md5: 5c82ac938b9886f441e79f47938a02b1
       size: 36736
+    - path: models/scaler.pkl
+      hash: md5
+      md5: c75e94c631228d1a1e2f2e3966f0ff87
+      size: 1327
   train:
-    cmd: .venv\Scripts\python.exe src/train.py
+    cmd: python src/train.py
     deps:
     - path: data/features/train_features.csv
       hash: md5
@@ -68,8 +75,8 @@ stages:
       size: 36736
     - path: params.yaml
       hash: md5
-      md5: 65f92239f7bbf28930f55915625e71ab
-      size: 449
+      md5: 2e2adef9b724244fb0e55da05320f6ad
+      size: 484
     - path: src/train.py
       hash: md5
       md5: b6a371d97e60464f7ddb7677f86ad6f4
@@ -85,7 +92,7 @@ stages:
       md5: 365e5bc3b70e5f9a2e32a837088e35b8
       size: 206529
   evaluate:
-    cmd: .venv\Scripts\python.exe src/evaluate.py
+    cmd: python src/evaluate.py
     deps:
     - path: data/features/test_features.csv
       hash: md5
@@ -97,8 +104,8 @@ stages:
       size: 206529
     - path: params.yaml
       hash: md5
-      md5: 65f92239f7bbf28930f55915625e71ab
-      size: 449
+      md5: 2e2adef9b724244fb0e55da05320f6ad
+      size: 484
     - path: src/evaluate.py
       hash: md5
       md5: 257ab874399e7f2d778fccfaa7dd1719

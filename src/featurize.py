@@ -1,5 +1,6 @@
 import os
 import yaml
+import joblib
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
@@ -12,8 +13,10 @@ def load_params():
 def main():
     prep_params, feat_params = load_params()
     
-    # Ensure directory exists
+    # Ensure directories exist
     os.makedirs(os.path.dirname(feat_params["features_train_path"]), exist_ok=True)
+    if "scaler_path" in feat_params:
+        os.makedirs(os.path.dirname(feat_params["scaler_path"]), exist_ok=True)
     
     # Load prepared datasets
     train_df = pd.read_csv(prep_params["prepared_train_path"])
@@ -29,6 +32,11 @@ def main():
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
+    
+    # Save fitted scaler artifact
+    if "scaler_path" in feat_params:
+        joblib.dump(scaler, feat_params["scaler_path"])
+        print(f"[featurize] Scaler saved to {feat_params['scaler_path']}")
     
     # Combine back scaled features with target
     feat_train_df = pd.DataFrame(X_train_scaled, columns=X_train.columns)

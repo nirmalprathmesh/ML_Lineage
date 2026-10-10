@@ -8,6 +8,7 @@ prepare:
 featurize:
   features_train_path: "data/features/train_features.csv"
   features_test_path: "data/features/test_features.csv"
+  scaler_path: "models/scaler.pkl"
 
 train:
   model_path: "models/model.pkl"
