@@ -44,12 +44,52 @@ The pipeline is defined in [`dvc.yaml`](dvc.yaml) across five modular stages:
 
 ## Setup & Reproduction
 
-### 1. Environment Activation
-Activate the project virtual environment:
+### 1. Fresh Machine Setup (Windows)
+
+#### Step A — Clone and Enter Repository
+```powershell
+git clone https://github.com/nirmalprathmesh/ML_Lineage.git
+cd ML_Lineage
+```
+
+#### Step B — Create Virtual Environment
+```powershell
+python -m venv .venv
+```
+
+#### Step C — Activate Virtual Environment
 ```powershell
 .venv\Scripts\Activate.ps1
 ```
-*Note: If running without an activated environment, explicitly invoke DVC and scripts via `.venv\Scripts\dvc.exe` and `.venv\Scripts\python.exe`.*
+*Note: If PowerShell script execution is restricted, run `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process` for your session.*
+
+#### Step D — Upgrade Pip and Install Dependencies
+```powershell
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+#### Step E — Verify Tools & Environment
+Confirm that Python, DVC, and MLflow are installed and accessible:
+```powershell
+python --version
+dvc --version
+mlflow --version
+```
+*Note: You can also invoke these tools directly without shell activation using `.venv\Scripts\python.exe`, `.venv\Scripts\dvc.exe`, and `.venv\Scripts\mlflow.exe`.*
+
+#### Step F — DVC Remote Storage Boundary
+The project's configured DVC remote in `.dvc/config` points to a local directory:
+```ini
+[core]
+    remote = local_storage
+['remote "local_storage"']
+    url = D:\ML_DVC_Storage
+```
+* **Local Storage Scope**: `D:\ML_DVC_Storage` is local disk storage on this computer, not a cloud backup.
+* **Portability on Fresh Machines**: A fresh clone on another computer will not be able to pull or recover DVC-tracked data and model artifacts unless `D:\ML_DVC_Storage` is accessible at that path or another remote storage location is configured (e.g. `dvc remote modify local_storage url <path-or-uri>`).
+
+---
 
 ### 2. Reproduce Pipeline
 Run the complete pipeline using DVC:
@@ -63,20 +103,24 @@ dvc repro
 * If dependencies or code have changed, DVC executes the required stages automatically.
 * If all preprocessing and model training stages are already up to date, DVC skips them without redundant retraining while `log_experiment` creates a distinct, traceable MLflow run.
 
-### 3. Check DVC Status
+### 3. Check DVC Status & Remote Sync
 ```powershell
+# Check workspace pipeline status:
 dvc status
-# Or directly:
-.venv\Scripts\dvc.exe status
+# Or directly: .venv\Scripts\dvc.exe status
+
+# Check remote synchronization status:
+dvc status -c
+# Or directly: .venv\Scripts\dvc.exe status -c
 ```
 
 ### 4. Push / Pull Data Artifacts
 ```powershell
-# Backup tracked artifacts to the configured remote
+# Backup tracked artifacts to the configured remote:
 dvc push
 # Or: .venv\Scripts\dvc.exe push
 
-# Restore tracked artifacts from remote storage
+# Restore tracked artifacts from remote storage:
 dvc pull
 # Or: .venv\Scripts\dvc.exe pull
 ```
