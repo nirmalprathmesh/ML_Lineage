@@ -16,3 +16,6 @@ mlruns/
 # OS specific files
 .DS_Store
 Thumbs.db
+
+# Generated reports
+reports/

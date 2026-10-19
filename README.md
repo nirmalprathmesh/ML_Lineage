@@ -114,3 +114,51 @@ Inside the UI, select the experiment **`ML_Lineage_Experiments`** to inspect:
   - `dvc.hash.raw_dataset`: Exact MD5 hash of raw data.
   - `dvc.hash.train_data` / `dvc.hash.test_data`: Exact MD5 hashes of dataset splits.
 - **Artifacts**: Downloadable `model/model.pkl`, `scaler/scaler.pkl`, `metrics/metrics.json`, `config/params.yaml`, and `lineage/lineage.json`.
+
+---
+
+## Historical Run Recovery (Stage 4)
+
+The recovery tool [`scripts/recover_run.py`](scripts/recover_run.py) inspects and restores historical experiment artifacts using recorded DVC hashes:
+
+```powershell
+# List all recorded runs
+python scripts/recover_run.py --list
+
+# Inspect run parameters, metrics, tags, and environment
+python scripts/recover_run.py <run_id> --inspect
+
+# Dry-run: preview artifacts that would be restored
+python scripts/recover_run.py <run_id> --dry-run
+
+# Verify artifact hashes without restoring files
+python scripts/recover_run.py <run_id> --verify-only
+
+# Full recovery: restore artifacts from DVC cache/remote and verify hashes
+python scripts/recover_run.py <run_id>
+```
+
+---
+
+## Lineage Report Generator (Stage 5)
+
+The lineage reporter [`scripts/lineage_report.py`](scripts/lineage_report.py) traces end-to-end data provenance and model lineage:
+
+`Raw dataset → prepared data → features & scaler → trained model → evaluation metrics`
+
+```powershell
+# Generate human-readable terminal lineage report
+python scripts/lineage_report.py <run_id>
+
+# Output structured JSON report to terminal
+python scripts/lineage_report.py <run_id> --format json
+
+# Export JSON report to a file
+python scripts/lineage_report.py <run_id> --format json --output reports/lineage_report.json
+
+# Export human-readable report to a file
+python scripts/lineage_report.py <run_id> --output reports/lineage_report.txt
+
+# List runs available for lineage reporting
+python scripts/lineage_report.py --list
+```
