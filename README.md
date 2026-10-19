@@ -206,3 +206,33 @@ python scripts/lineage_report.py <run_id> --output reports/lineage_report.txt
 # List runs available for lineage reporting
 python scripts/lineage_report.py --list
 ```
+
+---
+
+## Chatbot Interface (Stage 6)
+
+The chatbot [`app.py`](app.py) provides a browser-based conversational interface to interact with the ML pipeline versioning and lineage tracking system:
+
+```powershell
+# Launch the chatbot (virtual environment must be active or use full path)
+streamlit run app.py
+
+# Or directly:
+.venv\Scripts\streamlit.exe run app.py
+```
+
+Then open your browser at `http://localhost:8501`.
+
+### Available Chat Commands
+
+| Command | Description |
+|---------|-------------|
+| `list runs` | List all recorded MLflow experiment runs |
+| `inspect <run_id>` | View full details of a specific run |
+| `compare <run_id_a> <run_id_b>` | Compare two runs side-by-side |
+| `verify <run_id>` | Verify artifact hashes against workspace |
+| `lineage <run_id>` | Generate full lineage provenance report |
+| `status` | Show Git, DVC, and MLflow system status |
+| `help` | Show command reference |
+
+Partial run IDs (prefix match) are supported. Natural language queries like "show me the runs" or "what's the lineage for run a0c974c4?" also work.
