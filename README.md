@@ -49,11 +49,16 @@ Activate the project virtual environment:
 ```powershell
 .venv\Scripts\Activate.ps1
 ```
+*Note: If running without an activated environment, explicitly invoke DVC and scripts via `.venv\Scripts\dvc.exe` and `.venv\Scripts\python.exe`.*
 
 ### 2. Reproduce Pipeline
 Run the complete pipeline using DVC:
 ```powershell
+# If .venv is activated:
 dvc repro
+
+# Or directly:
+.venv\Scripts\dvc.exe repro
 ```
 * If dependencies or code have changed, DVC executes the required stages automatically.
 * If all preprocessing and model training stages are already up to date, DVC skips them without redundant retraining while `log_experiment` creates a distinct, traceable MLflow run.
@@ -61,15 +66,19 @@ dvc repro
 ### 3. Check DVC Status
 ```powershell
 dvc status
+# Or directly:
+.venv\Scripts\dvc.exe status
 ```
 
 ### 4. Push / Pull Data Artifacts
 ```powershell
 # Backup tracked artifacts to the configured remote
 dvc push
+# Or: .venv\Scripts\dvc.exe push
 
 # Restore tracked artifacts from remote storage
 dvc pull
+# Or: .venv\Scripts\dvc.exe pull
 ```
 
 ---

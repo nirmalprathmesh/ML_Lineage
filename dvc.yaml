@@ -1,6 +1,6 @@
 stages:
   prepare:
-    cmd: python src/prepare.py
+    cmd: .venv\Scripts\python src/prepare.py
     deps:
       - src/prepare.py
       - params.yaml
@@ -16,7 +16,7 @@ stages:
       - data/prepared/test.csv
 
   featurize:
-    cmd: python src/featurize.py
+    cmd: .venv\Scripts\python src/featurize.py
     deps:
       - src/featurize.py
       - data/prepared/train.csv
@@ -30,7 +30,7 @@ stages:
       - models/scaler.pkl
 
   train:
-    cmd: python src/train.py
+    cmd: .venv\Scripts\python src/train.py
     deps:
       - src/train.py
       - data/features/train_features.csv
@@ -43,7 +43,7 @@ stages:
       - models/model.pkl
 
   evaluate:
-    cmd: python src/evaluate.py
+    cmd: .venv\Scripts\python src/evaluate.py
     deps:
       - src/evaluate.py
       - models/model.pkl
@@ -54,7 +54,7 @@ stages:
           cache: false
 
   log_experiment:
-    cmd: python src/log_experiment.py
+    cmd: .venv\Scripts\python src/log_experiment.py
     deps:
       - src/log_experiment.py
       - metrics.json

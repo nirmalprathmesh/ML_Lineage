@@ -1,7 +1,7 @@
 schema: '2.0'
 stages:
   prepare:
-    cmd: python src/prepare.py
+    cmd: .venv\Scripts\python src/prepare.py
     deps:
     - path: params.yaml
       hash: md5
@@ -32,7 +32,7 @@ stages:
       md5: e6dccd29b15c08636f50bd2c0fd80a6a
       size: 12440
   featurize:
-    cmd: python src/featurize.py
+    cmd: .venv\Scripts\python src/featurize.py
     deps:
     - path: data/prepared/test.csv
       hash: md5
@@ -67,7 +67,7 @@ stages:
       md5: c75e94c631228d1a1e2f2e3966f0ff87
       size: 1327
   train:
-    cmd: python src/train.py
+    cmd: .venv\Scripts\python src/train.py
     deps:
     - path: data/features/train_features.csv
       hash: md5
@@ -92,7 +92,7 @@ stages:
       md5: 365e5bc3b70e5f9a2e32a837088e35b8
       size: 206529
   evaluate:
-    cmd: python src/evaluate.py
+    cmd: .venv\Scripts\python src/evaluate.py
     deps:
     - path: data/features/test_features.csv
       hash: md5
@@ -116,7 +116,7 @@ stages:
       md5: aed4c6216573de4906939205915c8bca
       size: 90
   log_experiment:
-    cmd: python src/log_experiment.py
+    cmd: .venv\Scripts\python src/log_experiment.py
     deps:
     - path: metrics.json
       hash: md5
