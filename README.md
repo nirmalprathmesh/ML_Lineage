@@ -209,30 +209,84 @@ python scripts/lineage_report.py --list
 
 ---
 
-## Chatbot Interface (Stage 6)
+## ML Lineage Studio Dashboard & Chat Assistant
 
-The chatbot [`app.py`](app.py) provides a browser-based conversational interface to interact with the ML pipeline versioning and lineage tracking system:
+[`app.py`](app.py) and [`dashboard_views.py`](dashboard_views.py) provide a modern, professional browser-based application for ML experiment tracking, pipeline data versioning, lineage visualization, artifact verification, historical run recovery, and conversational querying.
 
 ```powershell
-# Launch the chatbot (virtual environment must be active or use full path)
+# Launch the dashboard (virtual environment must be active or use full path)
 streamlit run app.py
 
 # Or directly:
 .venv\Scripts\streamlit.exe run app.py
 ```
 
-Then open your browser at `http://localhost:8501`.
+Then open your browser at:
+```
+http://localhost:8501
+```
+
+### Dashboard Sections
+
+The application provides eight dedicated sections accessible via the sidebar navigation:
+
+1. **Overview**: High-level KPI metrics (total runs, finished, failed, running, latest accuracy/F1, Git status, DVC remote status), Altair metric score trends across runs, and recent experiment history.
+2. **Experiments**: Searchable and filterable run table with search by ID or Git commit SHA, status multiselect, accuracy slider, and detailed run inspector tabs (Parameters, Git Provenance, Environment, Artifact Hashes, and Quick Action buttons). Supports CSV export.
+3. **Compare**: Side-by-side run comparison with metric delta indicators (`+0.0000`), parameter differences, artifact hash comparison, Git commit/branch diffs, and downloadable comparison CSV.
+4. **Lineage**: Visual DAG trace across all 5 pipeline stages (`prepare`, `featurize`, `train`, `evaluate`, `log_experiment`). Inspect inputs, outputs, recorded MD5 hashes, verification statuses, and download structured lineage JSON.
+5. **Artifacts**: Per-artifact recorded MD5 hash vs current workspace hash vs `dvc.lock` hash for all 7 tracked pipeline files. Includes live non-mutating CLI verification (`recover_run.py --verify-only`).
+6. **Recovery & Workspaces**:
+   - **Isolated Workspace (Recommended)**: Restores historical experiment states into a separate directory using `git worktree add <dest> <commit_sha>` without modifying active workspace files.
+   - **Current-Workspace Restore**: Deliberate two-step safety workflow requiring `--dry-run` inspection and explicit user confirmation before overwriting `data/` and `models/` artifacts.
+7. **Chat Assistant**: Natural language and command-based assistant with suggestion chips, strict regex intent routing, execution outputs, and safety boundaries.
+8. **System Status**: Deep diagnostic checks for Git repository (branch, commit, working tree modifications), MLflow connectivity, DVC workspace pipeline (`dvc status`), and DVC remote storage synchronization (`dvc status -c`).
 
 ### Available Chat Commands
 
-| Command | Description |
-|---------|-------------|
-| `list runs` | List all recorded MLflow experiment runs |
-| `inspect <run_id>` | View full details of a specific run |
-| `compare <run_id_a> <run_id_b>` | Compare two runs side-by-side |
-| `verify <run_id>` | Verify artifact hashes against workspace |
-| `lineage <run_id>` | Generate full lineage provenance report |
-| `status` | Show Git, DVC, and MLflow system status |
-| `help` | Show command reference |
+| Command | Category | Safety | Description |
+|---------|----------|--------|-------------|
+| `list runs` | Tracking | 🟢 Read-Only | List all recorded MLflow experiment runs |
+| `inspect <run_id>` | Tracking | 🟢 Read-Only | View full details, parameters, metrics, Git tags, and DVC hashes |
+| `compare <id_a> <id_b>` | Tracking | 🟢 Read-Only | Compare two runs side-by-side with metric delta indicators |
+| `verify <run_id>` | Verification | 🟢 Read-Only | Verify workspace artifact hashes using `scripts/recover_run.py --verify-only` |
+| `lineage <run_id>` | Lineage | 🟢 Read-Only | Generate full pipeline lineage DAG report via `scripts/lineage_report.py` |
+| `preview recover <run_id>`<br>`dry-run <run_id>` | Recovery | 🟢 Read-Only | Execute `scripts/recover_run.py --dry-run` to preview artifact restoration |
+| `recover <run_id>`<br>`restore <run_id>` | Recovery | 🟢 Read-Only (Until Confirmed) | Perform dry-run preview and request explicit user confirmation to restore |
+| `confirm recover <run_id>`<br>`confirm restore <run_id>` | Recovery | ⚠️ **Overwrites Workspace Files** | Restore historical artifacts from DVC cache/remote into `data/` and `models/` |
+| `cancel` | Recovery | 🟢 Read-Only | Cancel pending recovery operation |
+| `status` | System | 🟢 Read-Only | Show Git provenance, DVC workspace pipeline, DVC remote sync, and MLflow status |
+| `help` | System | 🟢 Read-Only | Show comprehensive command reference and file safety guide |
 
-Partial run IDs (prefix match) are supported. Natural language queries like "show me the runs" or "what's the lineage for run a0c974c4?" also work.
+### Dry-Run Before Confirmation & File Safety Workflow
+
+To safeguard active development and current models against unintentional data loss:
+1. Entering `recover <run_id>` or `restore <run_id>` **never immediately overwrites files**.
+2. The system executes a non-mutating `--dry-run` first to inspect artifact availability in the local DVC cache and configured DVC remote.
+3. A prominent overwrite warning is displayed alongside the restoration plan.
+4. The user must provide explicit matching confirmation by entering `confirm recover <run_id>` or clicking the **Confirm Restore** button in the Streamlit UI.
+5. Confirmation state is isolated strictly per user session in `st.session_state` and is immediately consumed prior to invocation.
+6. Entering `cancel` or any other recognized command immediately clears the pending confirmation state.
+
+### Running Automated Tests and Real-Data Validation
+
+The test suite covers backend data helpers, chatbot command routing, confirmation isolation, and real-data verification:
+
+```powershell
+# 1. Run the 24-point unit and mock test suite for chatbot recovery & isolation:
+.venv\Scripts\python.exe -m unittest tests/test_chatbot_recovery.py
+
+# 2. Run the 7-point dashboard data transformation and comparison test suite:
+.venv\Scripts\python.exe -m unittest tests/test_dashboard_data.py
+
+# 3. Run the 36-point real-data validation runner against MLflow runs & historical Git commits:
+.venv\Scripts\python.exe tests/validate_real_data.py
+
+# 4. Run real-data validation with Python UTF-8 mode:
+.venv\Scripts\python.exe -X utf8 tests/validate_real_data.py
+```
+
+### Limitations & Operating Boundaries
+- **Local DVC Remote**: Recovery looks for artifacts in the local DVC cache (`.dvc/cache`) and the configured local storage directory (`D:\ML_DVC_Storage`). On another machine, configure a new remote via `dvc remote modify local_storage url <path>`.
+- **Intent Parsing**: The chatbot uses deterministic regex pattern matching for strict routing. Natural language phrasing containing supported keywords is supported, but arbitrary conversational queries will fall back to suggested command help.
+- **Workspace Overwrite Scope**: Confirmed restoration directly overwrites the 7 tracked DVC pipeline artifacts in `data/` and `models/`. Code files, `params.yaml`, and `dvc.lock` remain governed by Git.
+- **Stale Runs**: Any runs that were interrupted or failed to record complete metadata (e.g. status `RUNNING` without metrics) are honestly presented in the UI with missing fields labeled as unavailable (`—` / `N/A`), and are never silently altered or removed.
