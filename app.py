@@ -1221,123 +1221,40 @@ def route_message(user_input: str) -> str:
 def main():
     st.set_page_config(
         page_title="ML Lineage Studio",
-        page_icon="🧬",
+        page_icon="◇",
         layout="wide",
         initial_sidebar_state="expanded",
     )
 
-    # Compact professional CSS
-    st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-
-    .stApp { font-family: 'Inter', sans-serif; }
-
-    /* Tighten metric cards */
-    div[data-testid="stMetric"] {
-        background: rgba(128, 128, 128, 0.04);
-        border: 1px solid rgba(128, 128, 128, 0.12);
-        border-radius: 6px;
-        padding: 0.5rem 0.75rem;
-    }
-    div[data-testid="stMetricValue"] {
-        font-size: 1.1rem !important;
-        font-weight: 600;
-    }
-    div[data-testid="stMetricLabel"] {
-        font-size: 0.72rem !important;
-        opacity: 0.7;
-    }
-    div[data-testid="stMetricDelta"] {
-        font-size: 0.72rem !important;
-    }
-
-    /* Tighter page top padding */
-    .block-container {
-        padding-top: 1.5rem !important;
-        padding-bottom: 1rem !important;
-    }
-
-    /* Sidebar */
-    section[data-testid="stSidebar"] { font-size: 0.88rem; }
-
-    /* Buttons */
-    .stButton > button {
-        border-radius: 5px;
-        font-weight: 500;
-        font-size: 0.83rem;
-        padding: 0.3rem 0.75rem;
-    }
-
-    /* Dataframe text */
-    .stDataFrame { font-size: 0.82rem; }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # ── Navigation Items ─────────────────────────────────────────────────────
-    pages = [
-        "Overview",
-        "Experiments",
-        "Compare",
-        "Lineage",
-        "Artifacts",
-        "Recovery & Workspaces",
-        "Chat Assistant",
-        "System Status",
-    ]
+    # Inject the design system CSS
+    dashboard_views.inject_design_system()
 
     # Initialize current page state
     if "current_page" not in st.session_state:
         st.session_state.current_page = "Overview"
 
-    nav_index = 0
-    for i, p in enumerate(pages):
-        if p == st.session_state.current_page:
-            nav_index = i
-            break
-
-    # ── Sidebar ─────────────────────────────────────────────────────────────
-    with st.sidebar:
-        st.markdown("**ML Lineage Studio**")
-        st.caption("Experiment tracking · Lineage · Recovery")
-        st.divider()
-
-        selected_nav = st.radio(
-            "Navigation",
-            pages,
-            index=nav_index,
-            label_visibility="collapsed",
-            key="main_nav_radio",
-        )
-        if selected_nav != st.session_state.current_page:
-            st.session_state.current_page = selected_nav
-            st.rerun()
-
-        st.divider()
-        git_info = get_git_status()
-        st.caption(f"Git: `{git_info.get('branch', '—')}` · `{git_info.get('commit', '—')[:7]}`")
-        st.caption(f"MLflow: `mlflow.db`")
-        st.caption(f"DVC: `local_storage`")
+    # ── Sidebar Navigation ──────────────────────────────────────────────────
+    app_module = sys.modules[__name__]
+    dashboard_views.render_sidebar(app_module)
 
     # ── View Routing ─────────────────────────────────────────────────────────
-    app_module = sys.modules[__name__]
     page = st.session_state.current_page
 
     if page == "Overview":
         dashboard_views.render_overview(app_module)
     elif page == "Experiments":
         dashboard_views.render_experiments(app_module)
-    elif page == "Compare":
+    elif page == "Compare Runs":
         dashboard_views.render_compare(app_module)
-    elif page == "Lineage":
+    elif page == "Lineage Explorer":
         dashboard_views.render_lineage(app_module)
     elif page == "Artifacts":
         dashboard_views.render_artifacts(app_module)
-    elif page == "Recovery & Workspaces":
+    elif page == "Recovery Center":
         dashboard_views.render_recovery(app_module)
     elif page == "Chat Assistant":
         dashboard_views.render_chat(app_module)
-    elif page == "System Status":
+    elif page == "System Health":
         dashboard_views.render_system_status(app_module)
     else:
         dashboard_views.render_overview(app_module)
