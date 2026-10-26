@@ -1,6 +1,23 @@
-# Data Versioning and Lineage Tracking System for ML Pipelines
+# ML Lineage Studio
+### End-to-End MLOps Provenance, Data Versioning, Experiment Tracking, and Artifact Recovery
 
-A robust Machine Learning operations (MLOps) pipeline integrating **Git**, **DVC**, and **MLflow** for end-to-end data versioning, pipeline automation, artifact tracking, and provenance lineage.
+A comprehensive Machine Learning operations (MLOps) platform integrating **Git**, **DVC**, and **MLflow** for end-to-end data versioning, deterministic pipeline automation, cross-system artifact tracking, and verifiable provenance lineage.
+
+---
+
+## The Problem It Solves
+
+Modern machine learning development faces three critical reproducibility and governance gaps:
+1. **Data & Model Drift Without Auditability**: Code changes are tracked in Git, but datasets, feature matrices, and binary model artifacts evolve separately, making it difficult to answer *"Which exact dataset split and preprocessing step produced this model?"*
+2. **Disconnected Experiment Tracking**: MLflow logs hyperparameters and evaluation metrics, but often lacks cryptographic links to the underlying binary files and exact pipeline state that generated them.
+3. **High-Risk Historical Recovery**: Reverting to an earlier experiment run often risks accidentally overwriting active workspace files or failing because intermediate data dependencies were lost.
+
+**ML Lineage Studio** solves these challenges by establishing an auditable **Lineage Bridge**:
+- Every pipeline execution logs the active **Git commit SHA** and **DVC MD5 hashes** as MLflow tags and a structured lineage manifest (`lineage/lineage.json`).
+- Workspace artifacts can be verified on-demand against recorded hashes (`scripts/recover_run.py --verify-only`).
+- Historical experiments can be inspected, previewed via dry-run simulation, restored into isolated workspaces (`git worktree`), or safely recovered into the active workspace with explicit confirmation gates.
+
+> **Note on Project Status**: ML Lineage Studio is a fully functioning MLOps engineering system and architectural reference implementation. It is designed for transparent reproducibility, local auditing, and portfolio demonstration rather than multi-tenant cloud SaaS deployment.
 
 ---
 
@@ -24,25 +41,26 @@ A robust Machine Learning operations (MLOps) pipeline integrating **Git**, **DVC
                                (Git SHA + DVC MD5 Hashes logged as MLflow tags & manifest)
 ```
 
-1. **Git:** Tracks source code (`src/`), pipeline definitions (`dvc.yaml`), configurations (`params.yaml`), dependencies (`requirements.txt`), and state locks (`dvc.lock`). Large binaries, dataset files, and MLflow run databases are strictly ignored.
-2. **DVC (Data Version Control):** Manages data ingestion, dataset splits, feature matrices, and trained models. Guarantees deterministic step caching and reproduction via `dvc repro`. Backed by local/remote storage (`D:\ML_DVC_Storage`).
-3. **MLflow:** Tracks experiment runs, hyperparameter configurations, evaluation metrics, artifact snapshots (`model.pkl`, `scaler.pkl`, `metrics.json`, `params.yaml`), and cross-system lineage metadata.
+1. **Git**: Tracks source code (`src/`), pipeline orchestration (`dvc.yaml`), hyperparameters (`params.yaml`), dependencies (`requirements.txt`), and state locks (`dvc.lock`). Large binaries, datasets, and tracking databases are strictly ignored.
+2. **DVC (Data Version Control)**: Manages raw data ingestion, stratified splits, feature matrices, and serialized model objects. Caches intermediate stages and enables reproducible stage execution via `dvc repro`. Configured with a dedicated storage remote.
+3. **MLflow**: Tracks experiment runs, hyperparameter sweeps, evaluation metrics, artifact snapshots (`model.pkl`, `scaler.pkl`, `metrics.json`, `params.yaml`), and cross-system lineage metadata.
+4. **Lineage Bridge**: Links Git code commits, DVC binary hashes, and MLflow run records into a single verifiable graph accessible via CLI tools and the interactive dashboard.
 
 ---
 
 ## Pipeline Stages
 
-The pipeline is defined in [`dvc.yaml`](dvc.yaml) across five modular stages:
+The reproducible pipeline is orchestrated in [`dvc.yaml`](dvc.yaml) across five modular stages using a Scikit-Learn Wine classification task:
 
-1. **`prepare`**: Loads raw Wine dataset from Scikit-Learn, saves to `data/raw/wine_dataset.csv`, and performs stratified train/test split into `data/prepared/`.
-2. **`featurize`**: Fits `StandardScaler` on training features, scales train/test sets into `data/features/`, and persists `models/scaler.pkl`.
-3. **`train`**: Trains a `RandomForestClassifier` using parameters in `params.yaml` and saves `models/model.pkl`.
-4. **`evaluate`**: Evaluates model on test features, computing Accuracy, Precision, Recall, and F1 score, saved to `metrics.json`.
-5. **`log_experiment`**: Captures active Git commit SHA, DVC artifact hashes from `dvc.lock`, system and library versions, parameters, and metrics, logging them to MLflow with a structured `lineage/lineage.json` manifest.
+1. **`prepare`**: Loads the Wine multiclass dataset, persists raw data to `data/raw/wine_dataset.csv`, and creates stratified train/test splits in `data/prepared/`.
+2. **`featurize`**: Fits a `StandardScaler` on training features, scales train/test feature sets into `data/features/`, and persists the fitted transformer to `models/scaler.pkl`.
+3. **`train`**: Fits a `RandomForestClassifier` according to hyperparameters defined in `params.yaml` (`n_estimators`, `max_depth`, `random_state`) and persists the model to `models/model.pkl`.
+4. **`evaluate`**: Evaluates the trained classifier on test features, computing Accuracy, Precision, Recall, and F1 score, exported to `metrics.json`.
+5. **`log_experiment`**: Captures the active Git commit SHA, DVC artifact hashes from `dvc.lock`, environment details, parameters, and metrics, logging them to MLflow with a structured `lineage/lineage.json` manifest.
 
 ---
 
-## Setup & Reproduction
+## Setup & Local Reproduction
 
 ### 1. Fresh Machine Setup (Windows)
 
@@ -76,7 +94,7 @@ python --version
 dvc --version
 mlflow --version
 ```
-*Note: You can also invoke these tools directly without shell activation using `.venv\Scripts\python.exe`, `.venv\Scripts\dvc.exe`, and `.venv\Scripts\mlflow.exe`.*
+*Tip: You can also invoke these tools directly without activating the shell using `.venv\Scripts\python.exe`, `.venv\Scripts\dvc.exe`, and `.venv\Scripts\mlflow.exe`.*
 
 #### Step F — DVC Remote Storage Boundary
 The project's configured DVC remote in `.dvc/config` points to a local directory:
@@ -86,43 +104,44 @@ The project's configured DVC remote in `.dvc/config` points to a local directory
 ['remote "local_storage"']
     url = D:\ML_DVC_Storage
 ```
-* **Local Storage Scope**: `D:\ML_DVC_Storage` is local disk storage on this computer, not a cloud backup.
-* **Portability on Fresh Machines**: A fresh clone on another computer will not be able to pull or recover DVC-tracked data and model artifacts unless `D:\ML_DVC_Storage` is accessible at that path or another remote storage location is configured (e.g. `dvc remote modify local_storage url <path-or-uri>`).
+* **Local Storage Scope**: `D:\ML_DVC_Storage` is local disk storage on the original host machine, not a cloud backup.
+* **Portability on Another Machine**: A fresh clone on another computer will not have access to `D:\ML_DVC_Storage`. To configure a local folder or cloud storage on a new machine:
+  ```powershell
+  # Point the remote to a directory on your machine:
+  dvc remote modify local_storage url C:\path\to\my_dvc_storage
+  ```
+* **Reproduction Without Pre-cached Binaries**: Running `dvc repro` executes the pipeline from scratch and regenerates all data, features, and model artifacts locally without needing external downloads.
 
 ---
 
 ### 2. Reproduce Pipeline
 Run the complete pipeline using DVC:
 ```powershell
-# If .venv is activated:
+# With virtual environment activated:
 dvc repro
 
-# Or directly:
+# Or directly via venv executable:
 .venv\Scripts\dvc.exe repro
 ```
-* If dependencies or code have changed, DVC executes the required stages automatically.
-* If all preprocessing and model training stages are already up to date, DVC skips them without redundant retraining while `log_experiment` creates a distinct, traceable MLflow run.
+* If dependencies, parameters, or code have changed, DVC executes the required stages automatically.
+* If all preprocessing and model training stages are already up to date, DVC skips them without redundant computation, while `log_experiment` records a distinct, traceable MLflow run.
 
 ### 3. Check DVC Status & Remote Sync
 ```powershell
 # Check workspace pipeline status:
 dvc status
-# Or directly: .venv\Scripts\dvc.exe status
 
-# Check remote synchronization status:
+# Check remote storage synchronization status:
 dvc status -c
-# Or directly: .venv\Scripts\dvc.exe status -c
 ```
 
 ### 4. Push / Pull Data Artifacts
 ```powershell
-# Backup tracked artifacts to the configured remote:
+# Backup tracked artifacts to the configured storage remote:
 dvc push
-# Or: .venv\Scripts\dvc.exe push
 
-# Restore tracked artifacts from remote storage:
+# Restore tracked artifacts from storage remote:
 dvc pull
-# Or: .venv\Scripts\dvc.exe pull
 ```
 
 ---
@@ -134,12 +153,10 @@ MLflow uses a local SQLite database store (`sqlite:///mlflow.db`) and local arti
 To launch the web interface:
 
 ```powershell
-# Using the active virtual environment
+# Using the active virtual environment:
 mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5000
-```
 
-Or directly via executable:
-```powershell
+# Or directly:
 .venv\Scripts\mlflow.exe ui --backend-store-uri sqlite:///mlflow.db --port 5000
 ```
 
@@ -149,7 +166,7 @@ http://127.0.0.1:5000
 ```
 
 Inside the UI, select the experiment **`ML_Lineage_Experiments`** to inspect:
-- **Parameters**: `n_estimators`, `max_depth`, `random_state`, `test_size`, paths, etc.
+- **Parameters**: `n_estimators`, `max_depth`, `random_state`, `test_size`, paths.
 - **Metrics**: `accuracy`, `precision`, `recall`, `f1_score`, `duration_seconds`.
 - **Tags & Lineage**:
   - `git.commit_sha`: Git commit hash for the exact code state.
@@ -161,49 +178,51 @@ Inside the UI, select the experiment **`ML_Lineage_Experiments`** to inspect:
 
 ---
 
-## Historical Run Recovery (Stage 4)
+## Historical Run Recovery CLI
 
-The recovery tool [`scripts/recover_run.py`](scripts/recover_run.py) inspects and restores historical experiment artifacts using recorded DVC hashes:
+The command-line recovery tool [`scripts/recover_run.py`](scripts/recover_run.py) inspects and restores historical experiment artifacts using recorded DVC hashes:
 
 ```powershell
-# List all recorded runs
+# List all recorded runs in the MLflow tracking store:
 python scripts/recover_run.py --list
 
-# Inspect run parameters, metrics, tags, and environment
+# Inspect run parameters, metrics, tags, and environment:
 python scripts/recover_run.py <run_id> --inspect
 
-# Dry-run: preview artifacts that would be restored
+# Dry-run: preview artifacts that would be restored (read-only):
 python scripts/recover_run.py <run_id> --dry-run
 
-# Verify artifact hashes without restoring files
+# Verify current workspace artifact hashes against recorded run (read-only):
 python scripts/recover_run.py <run_id> --verify-only
 
-# Full recovery: restore artifacts from DVC cache/remote and verify hashes
+# Full recovery: restore artifacts from DVC cache/remote into active workspace:
 python scripts/recover_run.py <run_id>
 ```
 
+> ⚠️ **Warning on Full Recovery**: Running `python scripts/recover_run.py <run_id>` without flags will directly overwrite the 7 tracked DVC pipeline files in `data/` and `models/`. Always perform `--dry-run` or `--verify-only` first.
+
 ---
 
-## Lineage Report Generator (Stage 5)
+## Lineage Report Generator CLI
 
-The lineage reporter [`scripts/lineage_report.py`](scripts/lineage_report.py) traces end-to-end data provenance and model lineage:
+The lineage reporting tool [`scripts/lineage_report.py`](scripts/lineage_report.py) traces end-to-end data provenance and model lineage:
 
-`Raw dataset → prepared data → features & scaler → trained model → evaluation metrics`
+$$\text{Raw dataset} \longrightarrow \text{Prepared data} \longrightarrow \text{Features \& Scaler} \longrightarrow \text{Trained model} \longrightarrow \text{Evaluation metrics}$$
 
 ```powershell
-# Generate human-readable terminal lineage report
+# Generate human-readable terminal lineage report:
 python scripts/lineage_report.py <run_id>
 
-# Output structured JSON report to terminal
+# Output structured JSON report to terminal:
 python scripts/lineage_report.py <run_id> --format json
 
-# Export JSON report to a file
+# Export JSON report to a file:
 python scripts/lineage_report.py <run_id> --format json --output reports/lineage_report.json
 
-# Export human-readable report to a file
+# Export human-readable report to a file:
 python scripts/lineage_report.py <run_id> --output reports/lineage_report.txt
 
-# List runs available for lineage reporting
+# List runs available for lineage reporting:
 python scripts/lineage_report.py --list
 ```
 
@@ -214,10 +233,10 @@ python scripts/lineage_report.py --list
 [`app.py`](app.py) and [`dashboard_views.py`](dashboard_views.py) provide a modern, professional browser-based application for ML experiment tracking, pipeline data versioning, lineage visualization, artifact verification, historical run recovery, and conversational querying.
 
 ```powershell
-# Launch the dashboard (virtual environment must be active or use full path)
+# Launch the dashboard:
 streamlit run app.py
 
-# Or directly:
+# Or directly via venv executable:
 .venv\Scripts\streamlit.exe run app.py
 ```
 
@@ -226,25 +245,27 @@ Then open your browser at:
 http://localhost:8501
 ```
 
-### Dashboard Sections
+### Dashboard Navigation & Sections
 
-The application provides eight dedicated sections accessible via the sidebar navigation:
+The application provides eight dedicated views accessible via the sidebar navigation:
 
-1. **Overview**: High-level KPI metrics (total runs, finished, failed, running, latest accuracy/F1, Git status, DVC remote status), Altair metric score trends across runs, and recent experiment history.
-2. **Experiments**: Searchable and filterable run table with search by ID or Git commit SHA, status multiselect, accuracy slider, and detailed run inspector tabs (Parameters, Git Provenance, Environment, Artifact Hashes, and Quick Action buttons). Supports CSV export.
-3. **Compare**: Side-by-side run comparison with metric delta indicators (`+0.0000`), parameter differences, artifact hash comparison, Git commit/branch diffs, and downloadable comparison CSV.
-4. **Lineage**: Visual DAG trace across all 5 pipeline stages (`prepare`, `featurize`, `train`, `evaluate`, `log_experiment`). Inspect inputs, outputs, recorded MD5 hashes, verification statuses, and download structured lineage JSON.
+1. **Overview**: Executive KPI metrics (Total Runs, Finished, Failed, Running, Latest Accuracy, Latest F1), performance trend visualization over experiment runs, and recent run history.
+2. **Experiments**: Multi-filter searchable run table (search by ID or Git commit SHA, status multiselect, accuracy slider) with a detailed inspector containing Parameters, Git Provenance, Environment, and Artifact Hashes tabs. Includes CSV export.
+3. **Compare Runs**: Side-by-side run comparison with metric delta indicators (`+0.0000`), hyperparameter differences, artifact hash comparison, Git commit diffs, and downloadable comparison CSV.
+4. **Lineage Explorer**: Visual pipeline DAG trace across all 5 stages (`prepare`, `featurize`, `train`, `evaluate`, `log_experiment`). Inspect inputs, outputs, recorded MD5 hashes, verification statuses, and download structured lineage JSON.
 5. **Artifacts**: Per-artifact recorded MD5 hash vs current workspace hash vs `dvc.lock` hash for all 7 tracked pipeline files. Includes live non-mutating CLI verification (`recover_run.py --verify-only`).
-6. **Recovery & Workspaces**:
+6. **Recovery Center**:
    - **Isolated Workspace (Recommended)**: Restores historical experiment states into a separate directory using `git worktree add <dest> <commit_sha>` without modifying active workspace files.
    - **Current-Workspace Restore**: Deliberate two-step safety workflow requiring `--dry-run` inspection and explicit user confirmation before overwriting `data/` and `models/` artifacts.
-7. **Chat Assistant**: Natural language and command-based assistant with suggestion chips, strict regex intent routing, execution outputs, and safety boundaries.
-8. **System Status**: Deep diagnostic checks for Git repository (branch, commit, working tree modifications), MLflow connectivity, DVC workspace pipeline (`dvc status`), and DVC remote storage synchronization (`dvc status -c`).
+7. **Chat Assistant**: Natural language and command-based assistant with suggestion chips, strict regex intent routing, execution outputs, and safety boundaries. Styled with a dark composer, high-contrast readable text, and responsive action states.
+8. **System Health**: Deep infrastructure diagnostics covering Git repository status (branch, commit, working tree modifications), MLflow connectivity, DVC workspace pipeline (`dvc status`), and DVC remote storage synchronization (`dvc status -c`).
+
+---
 
 ### Available Chat Commands
 
 | Command | Category | Safety | Description |
-|---------|----------|--------|-------------|
+|:---|:---|:---|:---|
 | `list runs` | Tracking | 🟢 Read-Only | List all recorded MLflow experiment runs |
 | `inspect <run_id>` | Tracking | 🟢 Read-Only | View full details, parameters, metrics, Git tags, and DVC hashes |
 | `compare <id_a> <id_b>` | Tracking | 🟢 Read-Only | Compare two runs side-by-side with metric delta indicators |
@@ -257,7 +278,9 @@ The application provides eight dedicated sections accessible via the sidebar nav
 | `status` | System | 🟢 Read-Only | Show Git provenance, DVC workspace pipeline, DVC remote sync, and MLflow status |
 | `help` | System | 🟢 Read-Only | Show comprehensive command reference and file safety guide |
 
-### Dry-Run Before Confirmation & File Safety Workflow
+---
+
+### Dry-Run Before Confirmation & Safety Workflow
 
 To safeguard active development and current models against unintentional data loss:
 1. Entering `recover <run_id>` or `restore <run_id>` **never immediately overwrites files**.
@@ -267,26 +290,42 @@ To safeguard active development and current models against unintentional data lo
 5. Confirmation state is isolated strictly per user session in `st.session_state` and is immediately consumed prior to invocation.
 6. Entering `cancel` or any other recognized command immediately clears the pending confirmation state.
 
-### Running Automated Tests and Real-Data Validation
+---
 
-The test suite covers backend data helpers, chatbot command routing, confirmation isolation, and real-data verification:
+## Automated Test Suite & Validation
+
+The test suite covers backend data helpers, chatbot command routing, session confirmation isolation, and real-data verification:
 
 ```powershell
-# 1. Run the 24-point unit and mock test suite for chatbot recovery & isolation:
+# 1. Run the entire unit and integration test suite (31 tests):
+.venv\Scripts\python.exe -m unittest discover -s tests
+
+# 2. Run the 24-point unit and mock test suite for chatbot recovery & isolation:
 .venv\Scripts\python.exe -m unittest tests/test_chatbot_recovery.py
 
-# 2. Run the 7-point dashboard data transformation and comparison test suite:
+# 3. Run the 7-point dashboard data transformation and comparison test suite:
 .venv\Scripts\python.exe -m unittest tests/test_dashboard_data.py
 
-# 3. Run the 36-point real-data validation runner against MLflow runs & historical Git commits:
+# 4. Run the 36-point real-data validation runner against MLflow runs & historical Git commits:
 .venv\Scripts\python.exe tests/validate_real_data.py
 
-# 4. Run real-data validation with Python UTF-8 mode:
+# 5. Run real-data validation with Python UTF-8 mode:
 .venv\Scripts\python.exe -X utf8 tests/validate_real_data.py
 ```
 
-### Limitations & Operating Boundaries
-- **Local DVC Remote**: Recovery looks for artifacts in the local DVC cache (`.dvc/cache`) and the configured local storage directory (`D:\ML_DVC_Storage`). On another machine, configure a new remote via `dvc remote modify local_storage url <path>`.
-- **Intent Parsing**: The chatbot uses deterministic regex pattern matching for strict routing. Natural language phrasing containing supported keywords is supported, but arbitrary conversational queries will fall back to suggested command help.
+### Verified Test Results
+
+- **Unit & Integration Suite**: 31 tests executed, **31 passed, 0 failed** in ~22s.
+- **Chatbot Recovery Suite**: 24 tests executed, **24 passed, 0 failed** (covers intent parsing, session isolation, confirmation rejections, and mock subprocess routing).
+- **Dashboard Data Suite**: 7 tests executed, **7 passed, 0 failed** (covers run resolution, metric delta formatting, and CSV export structures).
+- **Real-Data Validation Runner**: 36 automated checks executed against live SQLite tracking data (`mlflow.db`) and historical Git commits, **36 passed, 0 failed, 0 files modified** (strictly read-only).
+
+---
+
+## Limitations & Operating Boundaries
+
+- **Local Storage Remote**: DVC remote storage is configured to a local path (`D:\ML_DVC_Storage`). When cloning to another machine, update the remote target using `dvc remote modify local_storage url <new-path>`.
+- **Environment & Dependency Pinned State**: DVC guarantees deterministic tracking of dataset and model binary hashes. However, exact model reproduction across different operating systems requires matching Python versions and package versions pinned in `requirements.txt`.
+- **Chatbot Intent Routing**: The Chat Assistant uses deterministic regex pattern matching for strict routing. Natural language phrasing containing supported keywords is supported, while unsupported conversational queries fall back to suggested command help.
 - **Workspace Overwrite Scope**: Confirmed restoration directly overwrites the 7 tracked DVC pipeline artifacts in `data/` and `models/`. Code files, `params.yaml`, and `dvc.lock` remain governed by Git.
-- **Stale Runs**: Any runs that were interrupted or failed to record complete metadata (e.g. status `RUNNING` without metrics) are honestly presented in the UI with missing fields labeled as unavailable (`—` / `N/A`), and are never silently altered or removed.
+- **Interrupted Runs**: Interrupted runs (e.g. status `RUNNING` without completed metrics) are honestly presented in the UI with missing values marked as unavailable (`—` / `N/A`), and are never silently altered or pruned.

@@ -195,6 +195,98 @@ def inject_design_system():
         background-color: #1c2333;
     }
 
+    /* ── Chat Input & Sticky Bottom Bar ───────────────────────────────── */
+    /* Bottom sticky container wrapper & inner block container */
+    div[data-testid="stBottom"],
+    div[data-testid="stBottom"] > div,
+    div[data-testid="stBottomBlockContainer"],
+    .stChatFloatingInputContainer {
+        background-color: #0f1117 !important;
+        border-top: 1px solid #21262d !important;
+        box-shadow: none !important;
+    }
+
+    /* Chat input outer and inner container (removes red border) */
+    div[data-testid="stChatInput"],
+    div[data-testid="stChatInputContainer"],
+    div[data-testid="stChatInput"] > div {
+        background-color: #161b22 !important;
+        border: 1px solid #30363d !important;
+        border-radius: 8px !important;
+        box-shadow: none !important;
+        outline: none !important;
+    }
+
+    div[data-testid="stChatInput"]:focus-within,
+    div[data-testid="stChatInputContainer"]:focus-within,
+    div[data-testid="stChatInput"] > div:focus-within {
+        border-color: #58a6ff !important;
+        box-shadow: 0 0 0 1px #58a6ff !important;
+        outline: none !important;
+    }
+
+    /* Chat input textarea */
+    div[data-testid="stChatInputContainer"] textarea,
+    div[data-testid="stChatInput"] textarea {
+        background-color: transparent !important;
+        color: #f0f6fc !important;
+        -webkit-text-fill-color: #f0f6fc !important;
+        caret-color: #58a6ff !important;
+        font-family: inherit !important;
+        font-size: 0.88rem !important;
+        line-height: 1.4 !important;
+        border: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+    }
+
+    div[data-testid="stChatInputContainer"] textarea::placeholder,
+    div[data-testid="stChatInput"] textarea::placeholder {
+        color: #8b949e !important;
+        -webkit-text-fill-color: #8b949e !important;
+        opacity: 1 !important;
+    }
+
+    /* Chat input submit button */
+    div[data-testid="stChatInputContainer"] button,
+    div[data-testid="stChatInput"] button {
+        background-color: #1f6feb !important;
+        border: 1px solid #1f6feb !important;
+        color: #ffffff !important;
+        border-radius: 6px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        transition: background-color 0.15s ease, border-color 0.15s ease !important;
+    }
+
+    div[data-testid="stChatInputContainer"] button:hover:not(:disabled),
+    div[data-testid="stChatInput"] button:hover:not(:disabled) {
+        background-color: #388bfd !important;
+        border-color: #388bfd !important;
+    }
+
+    div[data-testid="stChatInputContainer"] button:disabled,
+    div[data-testid="stChatInput"] button:disabled {
+        background-color: #21262d !important;
+        border-color: #30363d !important;
+        color: #484f58 !important;
+        opacity: 0.5 !important;
+        cursor: not-allowed !important;
+    }
+
+    div[data-testid="stChatInputContainer"] button svg,
+    div[data-testid="stChatInput"] button svg {
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+    }
+
+    div[data-testid="stChatInputContainer"] button:disabled svg,
+    div[data-testid="stChatInput"] button:disabled svg {
+        fill: #484f58 !important;
+        stroke: #484f58 !important;
+    }
+
     /* ── Selectbox / Input ─────────────────────────────────────────────── */
     .stSelectbox > div > div,
     .stTextInput > div > div > input,
