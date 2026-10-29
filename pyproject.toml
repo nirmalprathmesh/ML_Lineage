@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ml-lineage"
+version = "0.2.0"
+description = "Terminal-first MLOps lineage, experiment tracking, and recovery tool"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "ML Lineage Studio Team"}
+]
+dependencies = [
+    "click>=8.0.0",
+    "pyyaml>=6.0",
+    "pandas>=2.0.0",
+    "mlflow>=2.10.0",
+    "dvc>=3.0.0",
+]
+
+[project.scripts]
+ml-lineage = "ml_lineage.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ml_lineage*"]

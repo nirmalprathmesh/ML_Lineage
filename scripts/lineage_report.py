@@ -44,48 +44,25 @@ from mlflow.tracking import MlflowClient
 # Constants & Path Mapping
 # ─────────────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PARAMS_PATH = os.path.join(PROJECT_ROOT, "params.yaml")
-DVC_LOCK_PATH = os.path.join(PROJECT_ROOT, "dvc.lock")
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-# Core pipeline lineage stages and artifacts
-PIPELINE_STAGES = [
-    {
-        "stage": "prepare",
-        "description": "Raw data ingestion & stratified train/test split",
-        "inputs": [],
-        "outputs": [
-            {"path": "data/raw/wine_dataset.csv", "tag": "dvc.hash.raw_dataset", "role": "Raw Dataset"},
-            {"path": "data/prepared/train.csv", "tag": "dvc.hash.prepared_train", "role": "Prepared Train Split"},
-            {"path": "data/prepared/test.csv", "tag": "dvc.hash.prepared_test", "role": "Prepared Test Split"},
-        ]
-    },
-    {
-        "stage": "featurize",
-        "description": "StandardScaler fitting & feature matrix transformation",
-        "inputs": ["data/prepared/train.csv", "data/prepared/test.csv"],
-        "outputs": [
-            {"path": "models/scaler.pkl", "tag": "dvc.hash.scaler", "role": "Fitted StandardScaler"},
-            {"path": "data/features/train_features.csv", "tag": "dvc.hash.features_train", "role": "Scaled Train Features"},
-            {"path": "data/features/test_features.csv", "tag": "dvc.hash.features_test", "role": "Scaled Test Features"},
-        ]
-    },
-    {
-        "stage": "train",
-        "description": "RandomForestClassifier training on scaled features",
-        "inputs": ["data/features/train_features.csv"],
-        "outputs": [
-            {"path": "models/model.pkl", "tag": "dvc.hash.model", "role": "Trained Classifier Model"},
-        ]
-    },
-    {
-        "stage": "evaluate",
-        "description": "Performance evaluation on test features",
-        "inputs": ["data/features/test_features.csv", "models/model.pkl"],
-        "outputs": [
-            {"path": "metrics.json", "tag": None, "role": "Calculated Evaluation Metrics"},
-        ]
-    }
-]
+from ml_lineage.core.context import ProjectContext
+from ml_lineage.core.hashing import compute_file_md5 as _core_compute_file_md5
+from ml_lineage.core.verification import check_artifact_provenance as _core_check_artifact_provenance
+from ml_lineage.adapters.dvc import DVCAdapter
+from ml_lineage.adapters.mlflow import MLflowAdapter
+from ml_lineage.wine import WINE_PIPELINE_STAGES
+
+DEFAULT_CONTEXT = ProjectContext.from_path(PROJECT_ROOT)
+_dvc_adapter = DVCAdapter(DEFAULT_CONTEXT)
+_mlflow_adapter = MLflowAdapter(DEFAULT_CONTEXT)
+
+PARAMS_PATH = str(DEFAULT_CONTEXT.params_path)
+DVC_LOCK_PATH = str(DEFAULT_CONTEXT.dvc_lock_path)
+
+# Core pipeline lineage stages and artifacts (Wine demo reference)
+PIPELINE_STAGES = WINE_PIPELINE_STAGES
 
 # Ensure UTF-8 output on Windows terminal
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf-8-sig"):
@@ -98,71 +75,26 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf-8-s
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper Functions: Tracking URI, Hashing, DVC Storage
+# Helper Functions: Tracking URI, Hashing, DVC Storage (Delegated to ml_lineage)
 # ─────────────────────────────────────────────────────────────────────────────
 def get_tracking_uri() -> str:
     """Retrieve absolute tracking URI from params.yaml or fallback."""
-    raw_uri = "sqlite:///mlflow.db"
-    if os.path.exists(PARAMS_PATH):
-        try:
-            with open(PARAMS_PATH, "r", encoding="utf-8") as f:
-                params = yaml.safe_load(f)
-            raw_uri = params.get("mlflow", {}).get("tracking_uri", "sqlite:///mlflow.db")
-        except Exception:
-            pass
-
-    if raw_uri.startswith("sqlite:///") and not os.path.isabs(raw_uri[10:]):
-        abs_db = os.path.join(PROJECT_ROOT, raw_uri[10:])
-        return f"sqlite:///{abs_db}"
-    return raw_uri
+    return DEFAULT_CONTEXT.tracking_uri
 
 
 def compute_file_md5(filepath: str) -> str:
     """Calculate the MD5 hash of a local file."""
-    hasher = hashlib.md5()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(1048576), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+    return _core_compute_file_md5(filepath)
 
 
 def load_dvc_lock_hashes() -> dict[str, str]:
     """Parse dvc.lock to extract current stage output MD5 hashes."""
-    hashes = {}
-    if not os.path.exists(DVC_LOCK_PATH):
-        return hashes
-
-    try:
-        with open(DVC_LOCK_PATH, "r", encoding="utf-8") as f:
-            lock = yaml.safe_load(f) or {}
-        for stage_name, stage_info in lock.get("stages", {}).items():
-            for out in stage_info.get("outs", []):
-                p = out.get("path")
-                md5 = out.get("md5")
-                if p and md5:
-                    hashes[p] = md5
-    except Exception as e:
-        print(f"[warning] Failed to parse dvc.lock: {e}", file=sys.stderr)
-
-    return hashes
+    return _dvc_adapter.load_lock_hashes()
 
 
 def get_dvc_remote_base() -> str | None:
     """Read local DVC remote storage directory from .dvc/config."""
-    cfg_path = os.path.join(PROJECT_ROOT, ".dvc", "config")
-    if not os.path.exists(cfg_path):
-        return None
-    try:
-        cp = configparser.ConfigParser()
-        cp.read(cfg_path)
-        for section in cp.sections():
-            if section.startswith("'remote \"") or section.startswith('remote "'):
-                url = cp[section].get("url", "")
-                if url:
-                    return url
-    except Exception:
-        pass
-    return None
+    return DEFAULT_CONTEXT.get_dvc_remote_url()
 
 
 def check_artifact_provenance(
@@ -175,86 +107,14 @@ def check_artifact_provenance(
     Examine the state of an artifact in the workspace, DVC cache, DVC remote,
     and compare against current dvc.lock.
     """
-    abs_path = os.path.join(PROJECT_ROOT, rel_path)
-    result = {
-        "path": rel_path,
-        "expected_hash": expected_hash or "unavailable",
-        "lock_hash": current_lock_hashes.get(rel_path, "unavailable"),
-        "workspace_exists": os.path.exists(abs_path),
-        "workspace_hash": None,
-        "workspace_status": "UNAVAILABLE",
-        "lock_status": "UNKNOWN",
-        "dvc_cache_available": False,
-        "dvc_remote_available": False,
-        "status": "UNVERIFIED"
-    }
-
-    # 1. Compare with current dvc.lock
-    if is_metrics_file or not expected_hash or expected_hash == "unavailable":
-        if rel_path in current_lock_hashes:
-            result["lock_status"] = "RECORDED_IN_LOCK"
-            result["lock_hash"] = current_lock_hashes[rel_path]
-        else:
-            result["lock_status"] = "UNTRACKED_IN_LOCK"
-    elif rel_path in current_lock_hashes:
-        if current_lock_hashes[rel_path] == expected_hash:
-            result["lock_status"] = "MATCHES_CURRENT_LOCK"
-        else:
-            result["lock_status"] = "HISTORICAL_VERSION_DIFFERS_FROM_LOCK"
-    else:
-        result["lock_status"] = "NOT_IN_CURRENT_LOCK"
-
-    # 2. Check local workspace
-    if result["workspace_exists"]:
-        try:
-            curr_hash = compute_file_md5(abs_path)
-            result["workspace_hash"] = curr_hash
-            if is_metrics_file:
-                result["workspace_status"] = "PRESENT"
-            elif expected_hash and expected_hash != "unavailable":
-                if curr_hash == expected_hash:
-                    result["workspace_status"] = "VERIFIED"
-                else:
-                    result["workspace_status"] = "HASH_MISMATCH"
-            else:
-                result["workspace_status"] = "PRESENT_UNTRACKED"
-        except Exception as e:
-            result["workspace_status"] = f"READ_ERROR ({e})"
-    else:
-        result["workspace_status"] = "MISSING"
-
-    # 3. Check DVC cache
-    if expected_hash and expected_hash != "unavailable":
-        cache_file = os.path.join(PROJECT_ROOT, ".dvc", "cache", "files", "md5", expected_hash[:2], expected_hash[2:])
-        if os.path.exists(cache_file):
-            result["dvc_cache_available"] = True
-
-        # 4. Check DVC remote
-        remote_base = get_dvc_remote_base()
-        if remote_base:
-            remote_file = os.path.join(remote_base, "files", "md5", expected_hash[:2], expected_hash[2:])
-            if os.path.exists(remote_file):
-                result["dvc_remote_available"] = True
-
-    # 5. Aggregate overall status
-    if is_metrics_file:
-        result["status"] = "METRICS_FILE_PRESENT" if result["workspace_exists"] else "METRICS_FILE_MISSING"
-    elif result["workspace_status"] == "VERIFIED":
-        result["status"] = "VERIFIED_IN_WORKSPACE"
-    elif result["dvc_cache_available"]:
-        result["status"] = "RECOVERABLE_FROM_CACHE"
-    elif result["dvc_remote_available"]:
-        result["status"] = "RECOVERABLE_FROM_REMOTE"
-    elif result["workspace_status"] == "HASH_MISMATCH":
-        result["status"] = "MISMATCH_AND_UNAVAILABLE_IN_DVC"
-    elif result["workspace_status"] == "PRESENT_UNTRACKED":
-        result["status"] = "NO_HASH_RECORDED_FOR_RUN"
-    elif result["workspace_status"] == "MISSING":
-        result["status"] = "MISSING_FROM_WORKSPACE_AND_DVC"
-    else:
-        result["status"] = "UNTRACKED_OR_UNAVAILABLE"
-
-    return result
+    return _core_check_artifact_provenance(
+        DEFAULT_CONTEXT,
+        rel_path,
+        expected_hash,
+        current_lock_hashes,
+        dvc_adapter=_dvc_adapter,
+        is_metrics_file=is_metrics_file,
+    )
 
 
 def resolve_mlflow_run(client: MlflowClient, run_id_prefix: str):

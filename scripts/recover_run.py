@@ -41,19 +41,22 @@ from mlflow.tracking import MlflowClient
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PARAMS_PATH = os.path.join(PROJECT_ROOT, "params.yaml")
-DVC_LOCK_PATH = os.path.join(PROJECT_ROOT, "dvc.lock")
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-# Artifact hash tags recorded by log_experiment.py
-DVC_TAG_MAP = {
-    "dvc.hash.raw_dataset":     "data/raw/wine_dataset.csv",
-    "dvc.hash.prepared_train":  "data/prepared/train.csv",
-    "dvc.hash.prepared_test":   "data/prepared/test.csv",
-    "dvc.hash.features_train":  "data/features/train_features.csv",
-    "dvc.hash.features_test":   "data/features/test_features.csv",
-    "dvc.hash.scaler":          "models/scaler.pkl",
-    "dvc.hash.model":           "models/model.pkl",
-}
+from ml_lineage.core.context import ProjectContext
+from ml_lineage.core.hashing import compute_file_md5 as _core_compute_file_md5
+from ml_lineage.adapters.dvc import DVCAdapter
+from ml_lineage.adapters.mlflow import MLflowAdapter
+from ml_lineage.wine import WINE_DVC_TAG_MAP
+
+DEFAULT_CONTEXT = ProjectContext.from_path(PROJECT_ROOT)
+_dvc_adapter = DVCAdapter(DEFAULT_CONTEXT)
+_mlflow_adapter = MLflowAdapter(DEFAULT_CONTEXT)
+
+PARAMS_PATH = str(DEFAULT_CONTEXT.params_path)
+DVC_LOCK_PATH = str(DEFAULT_CONTEXT.dvc_lock_path)
+DVC_TAG_MAP = WINE_DVC_TAG_MAP
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stdout encoding: force UTF-8 on Windows to prevent cp1252 errors
@@ -82,29 +85,15 @@ def head(msg: str) -> str: return _c("1;35", f"\n{'='*60}\n  {msg}\n{'='*60}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MLflow helpers
+# MLflow helpers (Delegated to ml_lineage)
 # ─────────────────────────────────────────────────────────────────────────────
 def _get_tracking_uri() -> str:
     """Load tracking URI from params.yaml, fall back to default."""
-    try:
-        with open(PARAMS_PATH) as f:
-            params = yaml.safe_load(f)
-        raw = params.get("mlflow", {}).get("tracking_uri", "sqlite:///mlflow.db")
-    except FileNotFoundError:
-        raw = "sqlite:///mlflow.db"
-
-    # Resolve relative sqlite paths relative to project root
-    if raw.startswith("sqlite:///") and not os.path.isabs(raw[10:]):
-        db_file = raw[10:]
-        abs_db = os.path.join(PROJECT_ROOT, db_file)
-        return f"sqlite:///{abs_db}"
-    return raw
+    return DEFAULT_CONTEXT.tracking_uri
 
 
 def _get_client() -> MlflowClient:
-    uri = _get_tracking_uri()
-    mlflow.set_tracking_uri(uri)
-    return MlflowClient()
+    return _mlflow_adapter.get_client()
 
 
 def _resolve_run(client: MlflowClient, run_id_prefix: str):
@@ -133,42 +122,21 @@ def _resolve_run(client: MlflowClient, run_id_prefix: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MD5 verification
+# MD5 verification & DVC artifact resolution (Delegated to ml_lineage)
 # ─────────────────────────────────────────────────────────────────────────────
 def _md5(path: str) -> str:
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    return _core_compute_file_md5(path)
 
 
 def _dvc_cache_path(md5_hash: str) -> str:
     """Return the path of a file inside the DVC local cache."""
-    # DVC stores: .dvc/cache/files/md5/<first2>/<rest>
-    cache_root = os.path.join(PROJECT_ROOT, ".dvc", "cache", "files", "md5")
-    return os.path.join(cache_root, md5_hash[:2], md5_hash[2:])
+    return str(_dvc_adapter.get_cache_file(md5_hash))
 
 
 def _dvc_remote_path(md5_hash: str) -> str | None:
     """Return the path of a file inside the configured local DVC remote."""
-    config_path = os.path.join(PROJECT_ROOT, ".dvc", "config")
-    if not os.path.exists(config_path):
-        return None
-    import configparser
-    cp = configparser.ConfigParser()
-    cp.read(config_path)
-    remote_url = None
-    for section in cp.sections():
-        if section.startswith("'remote \""):
-            url = cp[section].get("url", "")
-            if url:
-                remote_url = url
-                break
-    if not remote_url:
-        return None
-    remote_files_dir = os.path.join(remote_url, "files", "md5")
-    return os.path.join(remote_files_dir, md5_hash[:2], md5_hash[2:])
+    p = _dvc_adapter.get_remote_file(md5_hash)
+    return str(p) if p else None
 
 
 def _find_artifact_source(md5_hash: str) -> tuple[str | None, str]:
@@ -176,17 +144,8 @@ def _find_artifact_source(md5_hash: str) -> tuple[str | None, str]:
     Return (source_path, source_label) for the given DVC hash,
     checking the workspace file, local DVC cache, and local DVC remote.
     """
-    # 1. DVC local cache
-    cache = _dvc_cache_path(md5_hash)
-    if os.path.exists(cache):
-        return cache, "dvc_cache"
-
-    # 2. DVC configured remote (local path)
-    remote = _dvc_remote_path(md5_hash)
-    if remote and os.path.exists(remote):
-        return remote, "dvc_remote"
-
-    return None, "not_found"
+    p, label = _dvc_adapter.find_artifact_source(md5_hash)
+    return (str(p) if p else None, label)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

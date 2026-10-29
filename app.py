@@ -32,8 +32,13 @@ import dashboard_views
 os.environ["MLFLOW_DISABLE_AGENT_HINT"] = "1"
 os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
 
-import mlflow
-from mlflow.tracking import MlflowClient
+# Attempt to import mlflow; if unavailable, set placeholders
+try:
+    import mlflow
+    from mlflow.tracking import MlflowClient
+except ModuleNotFoundError:
+    mlflow = None  # type: ignore
+    MlflowClient = None  # type: ignore
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Project Constants
@@ -53,66 +58,45 @@ DVC_TAG_MAP = {
 }
 
 
+from ml_lineage.core.context import ProjectContext
+from ml_lineage.core.hashing import compute_file_md5 as _core_compute_file_md5
+from ml_lineage.core.verification import verify_run_artifacts as _core_verify_run_artifacts
+from ml_lineage.adapters.git import GitAdapter
+from ml_lineage.adapters.dvc import DVCAdapter
+from ml_lineage.adapters.mlflow import MLflowAdapter
+
+DEFAULT_CONTEXT = ProjectContext.from_path(PROJECT_ROOT)
+_git_adapter = GitAdapter(DEFAULT_CONTEXT)
+_dvc_adapter = DVCAdapter(DEFAULT_CONTEXT)
+_mlflow_adapter = MLflowAdapter(DEFAULT_CONTEXT)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# MLflow / Config Helpers
+# MLflow / Config Helpers (Delegated to ml_lineage)
 # ─────────────────────────────────────────────────────────────────────────────
 def get_tracking_uri() -> str:
     """Retrieve absolute tracking URI from params.yaml or fallback."""
-    raw_uri = "sqlite:///mlflow.db"
-    if os.path.exists(PARAMS_PATH):
-        try:
-            with open(PARAMS_PATH, "r", encoding="utf-8") as f:
-                params = yaml.safe_load(f)
-            raw_uri = params.get("mlflow", {}).get("tracking_uri", "sqlite:///mlflow.db")
-        except Exception:
-            pass
-    if raw_uri.startswith("sqlite:///") and not os.path.isabs(raw_uri[10:]):
-        abs_db = os.path.join(PROJECT_ROOT, raw_uri[10:])
-        return f"sqlite:///{abs_db}"
-    return raw_uri
+    return DEFAULT_CONTEXT.tracking_uri
 
 
 def get_mlflow_client() -> MlflowClient:
     """Create an MLflow client configured with the project's tracking URI."""
-    uri = get_tracking_uri()
-    mlflow.set_tracking_uri(uri)
-    return MlflowClient()
+    return _mlflow_adapter.get_client()
 
 
 def compute_file_md5(filepath: str) -> str:
     """Calculate MD5 hash of a local file."""
-    hasher = hashlib.md5()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(1048576), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+    return _core_compute_file_md5(filepath)
 
 
 def load_dvc_lock_hashes() -> dict:
     """Parse dvc.lock to extract current stage output MD5 hashes."""
-    hashes = {}
-    if not os.path.exists(DVC_LOCK_PATH):
-        return hashes
-    try:
-        with open(DVC_LOCK_PATH, "r", encoding="utf-8") as f:
-            lock = yaml.safe_load(f) or {}
-        for stage_name, stage_info in lock.get("stages", {}).items():
-            for out in stage_info.get("outs", []):
-                p = out.get("path")
-                md5 = out.get("md5")
-                if p and md5:
-                    hashes[p] = md5
-    except Exception:
-        pass
-    return hashes
+    return _dvc_adapter.load_lock_hashes()
 
 
 def get_python_executable() -> str:
     """Return path to verified project venv Python or sys.executable."""
-    venv_py = os.path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe")
-    if os.path.exists(venv_py):
-        return venv_py
-    return sys.executable
+    return DEFAULT_CONTEXT.python_executable
 
 
 # Test-only isolated confirmation fixture hook (ONLY active when explicitly enabled by unit tests/harnesses)
@@ -292,128 +276,22 @@ def run_recovery_subprocess(run_id: str, extra_args: list = None, timeout: int =
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_all_runs() -> list:
     """Fetch all MLflow runs from the project's tracking store."""
-    client = get_mlflow_client()
-    exps = client.search_experiments()
-    exp_ids = [e.experiment_id for e in exps]
-    if not exp_ids:
-        return []
-    runs = client.search_runs(exp_ids, order_by=["start_time DESC"])
-    return runs
+    return _mlflow_adapter.fetch_all_runs()
 
 
 def resolve_run(run_id_prefix: str):
     """Find a run by full ID or prefix. Returns the run object or None."""
-    client = get_mlflow_client()
-    exps = client.search_experiments()
-    exp_ids = [e.experiment_id for e in exps]
-    runs = client.search_runs(exp_ids)
-    matches = [r for r in runs if r.info.run_id.startswith(run_id_prefix)]
-    if len(matches) == 1:
-        return matches[0]
-    return None
+    return _mlflow_adapter.resolve_run(run_id_prefix)
 
 
 def get_run_details(run) -> dict:
     """Extract a structured dict of run information."""
-    client = get_mlflow_client()
-    tags = run.data.tags
-    params = run.data.params
-    metrics = run.data.metrics
-    experiment = client.get_experiment(run.info.experiment_id)
-
-    start_ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(run.info.start_time / 1000))
-    end_ts = (
-        time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(run.info.end_time / 1000))
-        if run.info.end_time else "In Progress"
-    )
-
-    return {
-        "run_id": run.info.run_id,
-        "experiment_name": experiment.name,
-        "experiment_id": run.info.experiment_id,
-        "status": run.info.status,
-        "start_time": start_ts,
-        "end_time": end_ts,
-        "artifact_uri": run.info.artifact_uri,
-        "git": {
-            "commit_sha": tags.get("git.commit_sha", "unavailable"),
-            "branch": tags.get("git.branch", "unavailable"),
-            "is_dirty": tags.get("git.is_dirty", "unavailable"),
-        },
-        "environment": {
-            "python_version": tags.get("env.python_version", "unavailable"),
-            "os_platform": tags.get("env.os_platform", "unavailable"),
-            "scikit_learn": tags.get("env.scikit_learn", "unavailable"),
-            "pandas": tags.get("env.pandas", "unavailable"),
-            "numpy": tags.get("env.numpy", "unavailable"),
-            "dvc": tags.get("env.dvc", "unavailable"),
-            "mlflow": tags.get("env.mlflow", "unavailable"),
-        },
-        "parameters": params,
-        "metrics": metrics,
-        "dvc_hashes": {
-            tag_key: tags.get(tag_key, "unavailable")
-            for tag_key in DVC_TAG_MAP
-        },
-    }
+    return _mlflow_adapter.get_run_details(run, tag_map=DVC_TAG_MAP)
 
 
 def get_runs_dataframe(runs=None) -> pd.DataFrame:
     """Convert MLflow runs into a clean, typed pandas DataFrame for dashboard views."""
-    if runs is None:
-        runs = fetch_all_runs()
-
-    if not runs:
-        return pd.DataFrame(columns=[
-            "run_id", "short_id", "status", "experiment", "experiment_id",
-            "accuracy", "precision", "recall", "f1_score", "duration_seconds",
-            "start_time", "start_epoch_ms", "git_commit", "git_commit_full",
-            "git_branch", "git_dirty", "model_type", "n_estimators", "max_depth"
-        ])
-
-    client = get_mlflow_client()
-    try:
-        exp_map = {e.experiment_id: e.name for e in client.search_experiments()}
-    except Exception:
-        exp_map = {}
-
-    records = []
-    for r in runs:
-        tags = r.data.tags
-        metrics = r.data.metrics
-        params = r.data.params
-        exp_name = exp_map.get(r.info.experiment_id, r.info.experiment_id)
-
-        start_ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(r.info.start_time / 1000))
-
-        # Calculate duration if end_time present
-        duration = metrics.get("duration_seconds")
-        if duration is None and r.info.end_time and r.info.start_time:
-            duration = round((r.info.end_time - r.info.start_time) / 1000.0, 3)
-
-        records.append({
-            "run_id": r.info.run_id,
-            "short_id": r.info.run_id[:8],
-            "status": r.info.status,
-            "experiment": exp_name,
-            "experiment_id": r.info.experiment_id,
-            "accuracy": metrics.get("accuracy"),
-            "precision": metrics.get("precision"),
-            "recall": metrics.get("recall"),
-            "f1_score": metrics.get("f1_score"),
-            "duration_seconds": duration,
-            "start_time": start_ts,
-            "start_epoch_ms": r.info.start_time,
-            "git_commit": tags.get("git.commit_sha", "unavailable")[:8] if tags.get("git.commit_sha") else "N/A",
-            "git_commit_full": tags.get("git.commit_sha", "unavailable"),
-            "git_branch": tags.get("git.branch", "N/A"),
-            "git_dirty": tags.get("git.is_dirty", "N/A"),
-            "model_type": params.get("model_type", "N/A"),
-            "n_estimators": params.get("n_estimators", "N/A"),
-            "max_depth": params.get("max_depth", "N/A"),
-        })
-
-    return pd.DataFrame(records)
+    return _mlflow_adapter.get_runs_dataframe(runs=runs)
 
 
 def fetch_lineage_report_data(run_id_prefix: str) -> dict | None:
@@ -450,171 +328,27 @@ def fetch_lineage_report_data(run_id_prefix: str) -> dict | None:
 
 def get_run_comparison_matrix(run_id_a: str, run_id_b: str) -> dict:
     """Generate structured side-by-side comparison data for two runs."""
-    run_a = resolve_run(run_id_a)
-    run_b = resolve_run(run_id_b)
-    if not run_a or not run_b:
-        return {"error": f"One or both runs ('{run_id_a}', '{run_id_b}') could not be resolved."}
-
-    det_a = get_run_details(run_a)
-    det_b = get_run_details(run_b)
-
-    metrics_comparison = []
-    all_metrics = sorted(set(det_a["metrics"].keys()) | set(det_b["metrics"].keys()))
-    for m in all_metrics:
-        va = det_a["metrics"].get(m)
-        vb = det_b["metrics"].get(m)
-        delta = None
-        if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
-            delta = vb - va
-        metrics_comparison.append({
-            "metric": m,
-            "run_a": va,
-            "run_b": vb,
-            "delta": delta,
-        })
-
-    params_comparison = []
-    all_params = sorted(set(det_a["parameters"].keys()) | set(det_b["parameters"].keys()))
-    for p in all_params:
-        pa = det_a["parameters"].get(p, "N/A")
-        pb = det_b["parameters"].get(p, "N/A")
-        params_comparison.append({
-            "parameter": p,
-            "run_a": pa,
-            "run_b": pb,
-            "changed": pa != pb,
-        })
-
-    hashes_comparison = []
-    for tag_key, path in DVC_TAG_MAP.items():
-        ha = det_a["dvc_hashes"].get(tag_key, "N/A")
-        hb = det_b["dvc_hashes"].get(tag_key, "N/A")
-        hashes_comparison.append({
-            "artifact": path,
-            "run_a_hash": ha,
-            "run_b_hash": hb,
-            "match": ha == hb and ha != "N/A",
-        })
-
-    return {
-        "run_a": det_a,
-        "run_b": det_b,
-        "metrics": metrics_comparison,
-        "parameters": params_comparison,
-        "hashes": hashes_comparison,
-    }
+    return _mlflow_adapter.get_run_comparison_matrix(run_id_a, run_id_b, tag_map=DVC_TAG_MAP)
 
 
 def verify_run_artifacts(run) -> list:
     """Verify DVC artifact hashes for a run against the workspace and DVC cache."""
-    tags = run.data.tags
-    lock_hashes = load_dvc_lock_hashes()
-    results = []
-
-    for tag_key, rel_path in DVC_TAG_MAP.items():
-        expected_hash = tags.get(tag_key, "")
-        abs_path = os.path.join(PROJECT_ROOT, rel_path)
-
-        entry = {
-            "artifact": rel_path,
-            "expected_hash": expected_hash or "unavailable",
-            "workspace_exists": os.path.exists(abs_path),
-            "workspace_hash": None,
-            "status": "UNVERIFIED",
-            "lock_hash": lock_hashes.get(rel_path, "unavailable"),
-        }
-
-        if not expected_hash or expected_hash == "unavailable":
-            entry["status"] = "NO_HASH_RECORDED"
-            results.append(entry)
-            continue
-
-        if os.path.exists(abs_path):
-            current_hash = compute_file_md5(abs_path)
-            entry["workspace_hash"] = current_hash
-            if current_hash == expected_hash:
-                entry["status"] = "✅ VERIFIED"
-            else:
-                entry["status"] = "⚠️ HASH_MISMATCH"
-        else:
-            entry["status"] = "❌ MISSING"
-
-        # Check DVC cache
-        cache_file = os.path.join(PROJECT_ROOT, ".dvc", "cache", "files", "md5",
-                                  expected_hash[:2], expected_hash[2:])
-        if os.path.exists(cache_file):
-            if entry["status"] != "✅ VERIFIED":
-                entry["status"] += " (recoverable from cache)"
-
-        results.append(entry)
-
-    return results
+    return _core_verify_run_artifacts(DEFAULT_CONTEXT, run, tag_map=DVC_TAG_MAP, dvc_adapter=_dvc_adapter)
 
 
 def get_git_status() -> dict:
     """Get current Git status information."""
-    info = {}
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, cwd=PROJECT_ROOT
-        )
-        info["commit"] = result.stdout.strip() if result.returncode == 0 else "unavailable"
-    except Exception:
-        info["commit"] = "unavailable"
-
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, cwd=PROJECT_ROOT
-        )
-        info["branch"] = result.stdout.strip() if result.returncode == 0 else "unavailable"
-    except Exception:
-        info["branch"] = "unavailable"
-
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True, text=True, cwd=PROJECT_ROOT
-        )
-        info["clean"] = not bool(result.stdout.strip()) if result.returncode == 0 else "unknown"
-    except Exception:
-        info["clean"] = "unknown"
-
-    return info
+    return _git_adapter.get_status()
 
 
 def get_dvc_status() -> str:
     """Run dvc status and return output."""
-    try:
-        dvc_exe = os.path.join(PROJECT_ROOT, ".venv", "Scripts", "dvc.exe")
-        if not os.path.exists(dvc_exe):
-            dvc_exe = "dvc"
-        result = subprocess.run(
-            [dvc_exe, "status"],
-            capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=30
-        )
-        return result.stdout.strip() if result.returncode == 0 else f"Error: {result.stderr.strip()}"
-    except Exception as e:
-        return f"Error running dvc status: {e}"
+    return _dvc_adapter.get_status()
 
 
 def get_dvc_remote_status() -> str:
     """Run dvc status -c and return output, clearly indicating remote sync status."""
-    try:
-        dvc_exe = os.path.join(PROJECT_ROOT, ".venv", "Scripts", "dvc.exe")
-        if not os.path.exists(dvc_exe):
-            dvc_exe = "dvc"
-        result = subprocess.run(
-            [dvc_exe, "status", "-c"],
-            capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=30
-        )
-        if result.returncode == 0:
-            out = result.stdout.strip()
-            return out if out else "Cache and remote storage are in sync."
-        return f"DVC remote check returned code {result.returncode}: {result.stderr.strip() or result.stdout.strip()}"
-    except Exception as e:
-        return f"Could not check DVC remote: {e}"
+    return _dvc_adapter.get_remote_status()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
