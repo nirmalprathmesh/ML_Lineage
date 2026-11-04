@@ -31,16 +31,72 @@ class ProjectContext:
         dvc_lock_filename: str = "dvc.lock",
         dvc_yaml_filename: str = "dvc.yaml",
         custom_tracking_uri: str | None = None,
+        custom_experiment_name: str | None = None,
     ):
         self.root: Path = Path(root).resolve()
-        self.params_path: Path = self.root / params_filename
-        self.dvc_lock_path: Path = self.root / dvc_lock_filename
-        self.dvc_yaml_path: Path = self.root / dvc_yaml_filename
+        self._params_filename = params_filename
+        self._dvc_lock_filename = dvc_lock_filename
+        self._dvc_yaml_filename = dvc_yaml_filename
+        self._custom_tracking_uri = custom_tracking_uri
+        self._custom_experiment_name = custom_experiment_name
         self.dvc_dir: Path = self.root / ".dvc"
         self.dvc_config_path: Path = self.dvc_dir / "config"
         self.dvc_cache_root: Path = self.dvc_dir / "cache" / "files" / "md5"
-        self._custom_tracking_uri = custom_tracking_uri
+        self._cached_config: dict[str, Any] | None = None
         self._cached_params: dict[str, Any] | None = None
+
+    @property
+    def config(self) -> dict[str, Any]:
+        """Load and cache project configuration from .ml-lineage.yaml if present."""
+        if self._cached_config is None:
+            candidates = [
+                self.root / ".ml-lineage.yaml",
+                self.root / ".ml-lineage.yml",
+            ]
+            self._cached_config = {}
+            for c in candidates:
+                if c.is_file():
+                    try:
+                        with c.open("r", encoding="utf-8") as f:
+                            self._cached_config = yaml.safe_load(f) or {}
+                            break
+                    except Exception:
+                        self._cached_config = {}
+        return self._cached_config
+
+    def reload_config(self) -> dict[str, Any]:
+        """Force reloading .ml-lineage.yaml configuration from disk."""
+        self._cached_config = None
+        return self.config
+
+    @property
+    def project_name(self) -> str:
+        """Return the resolved project name."""
+        return self.config.get("project", {}).get("name") or self.root.name
+
+    @property
+    def params_path(self) -> Path:
+        """Path to params file, respecting .ml-lineage.yaml override."""
+        custom_file = self.config.get("params", {}).get("file")
+        if custom_file:
+            return self.resolve_path(custom_file)
+        return self.root / self._params_filename
+
+    @property
+    def dvc_lock_path(self) -> Path:
+        """Path to dvc.lock, respecting .ml-lineage.yaml override."""
+        custom_file = self.config.get("dvc", {}).get("lock_file")
+        if custom_file:
+            return self.resolve_path(custom_file)
+        return self.root / self._dvc_lock_filename
+
+    @property
+    def dvc_yaml_path(self) -> Path:
+        """Path to dvc.yaml, respecting .ml-lineage.yaml override."""
+        custom_file = self.config.get("dvc", {}).get("pipeline_file") or self.config.get("dvc", {}).get("yaml_file")
+        if custom_file:
+            return self.resolve_path(custom_file)
+        return self.root / self._dvc_yaml_filename
 
     @classmethod
     def from_path(
@@ -51,7 +107,7 @@ class ProjectContext:
         """Resolve a ProjectContext from an explicit path or search upwards from CWD.
 
         Args:
-            target_path: Explicit directory path. If None, uses Path.cwd().
+            target_path: Explicit directory path. If None, checks ML_LINEAGE_PATH or uses Path.cwd().
             search_parents: If True and target is not immediately identifiable as a project,
                            traverse parents looking for markers (.git, params.yaml, dvc.yaml).
 
@@ -64,9 +120,15 @@ class ProjectContext:
                 raise FileNotFoundError(f"Target project path does not exist: {resolved}")
             return cls(resolved)
 
+        env_path = os.environ.get("ML_LINEAGE_PATH")
+        if env_path:
+            resolved = Path(env_path).resolve()
+            if resolved.exists():
+                return cls(resolved)
+
         # Start from current working directory
         current = Path.cwd().resolve()
-        markers = (".git", "params.yaml", "dvc.yaml", ".dvc", ".ml-lineage.yaml")
+        markers = (".ml-lineage.yaml", ".ml-lineage.yml", ".git", "params.yaml", "dvc.yaml", ".dvc")
 
         if search_parents:
             probe = current
@@ -109,12 +171,26 @@ class ProjectContext:
 
         Resolution precedence:
         1. Explicitly provided custom_tracking_uri
-        2. params.yaml -> mlflow.tracking_uri (project-scoped configuration)
-        3. MLFLOW_TRACKING_URI environment variable (if not configured in project)
-        4. Fallback: sqlite:///<project_root>/mlflow.db
+        2. Environment variables: ML_LINEAGE_TRACKING_URI or MLFLOW_TRACKING_URI
+        3. Project .ml-lineage.yaml -> mlflow.tracking_uri
+        4. Project params.yaml -> mlflow.tracking_uri
+        5. Default fallback: sqlite:///<project_root>/mlflow.db
         """
         if self._custom_tracking_uri:
             return self._custom_tracking_uri
+
+        env_uri = os.environ.get("ML_LINEAGE_TRACKING_URI") or os.environ.get("MLFLOW_TRACKING_URI")
+        if env_uri:
+            return env_uri
+
+        config_raw = self.config.get("mlflow", {}).get("tracking_uri")
+        if config_raw:
+            if config_raw.startswith("sqlite:///"):
+                db_rel = config_raw[10:]
+                if not os.path.isabs(db_rel):
+                    abs_db = str(self.resolve_path(db_rel))
+                    return f"sqlite:///{abs_db}"
+            return config_raw
 
         project_raw = self.params.get("mlflow", {}).get("tracking_uri")
         if project_raw:
@@ -125,17 +201,32 @@ class ProjectContext:
                     return f"sqlite:///{abs_db}"
             return project_raw
 
-        env_uri = os.environ.get("MLFLOW_TRACKING_URI")
-        if env_uri:
-            return env_uri
-
         # Default fallback: sqlite:///<project_root>/mlflow.db
         abs_db = str(self.resolve_path("mlflow.db"))
         return f"sqlite:///{abs_db}"
 
     @property
     def experiment_name(self) -> str:
-        """Return the configured MLflow experiment name."""
+        """Return the configured MLflow experiment name.
+
+        Resolution precedence:
+        1. Explicitly provided custom_experiment_name
+        2. Environment variables: ML_LINEAGE_EXPERIMENT or MLFLOW_EXPERIMENT_NAME
+        3. Project .ml-lineage.yaml -> mlflow.experiment_name
+        4. Project params.yaml -> mlflow.experiment_name
+        5. Default: "ML_Lineage_Experiments"
+        """
+        if self._custom_experiment_name:
+            return self._custom_experiment_name
+
+        env_exp = os.environ.get("ML_LINEAGE_EXPERIMENT") or os.environ.get("MLFLOW_EXPERIMENT_NAME")
+        if env_exp:
+            return env_exp
+
+        config_exp = self.config.get("mlflow", {}).get("experiment_name")
+        if config_exp:
+            return config_exp
+
         return self.params.get("mlflow", {}).get("experiment_name", "ML_Lineage_Experiments")
 
     def get_dvc_remote_url(self, remote_name: str | None = None) -> str | None:
@@ -217,10 +308,13 @@ class ProjectContext:
         """Return a structured summary of the resolved project context."""
         return {
             "root": str(self.root),
+            "project_name": self.project_name,
             "params_path": str(self.params_path),
             "params_exists": self.params_path.is_file(),
             "dvc_lock_path": str(self.dvc_lock_path),
             "dvc_lock_exists": self.dvc_lock_path.is_file(),
+            "dvc_yaml_path": str(self.dvc_yaml_path),
+            "dvc_yaml_exists": self.dvc_yaml_path.is_file(),
             "dvc_config_path": str(self.dvc_config_path),
             "dvc_config_exists": self.dvc_config_path.is_file(),
             "dvc_remote_url": self.get_dvc_remote_url(),

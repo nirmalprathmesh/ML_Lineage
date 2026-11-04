@@ -3,6 +3,64 @@
 
 A comprehensive Machine Learning operations (MLOps) platform integrating **Git**, **DVC**, and **MLflow** for end-to-end data versioning, deterministic pipeline automation, cross-system artifact tracking, and verifiable provenance lineage.
 
+Features a **terminal-first CLI** (`ml-lineage`) for multi-project management, an interactive **Streamlit dashboard**, and an auditable **Lineage Bridge** for deterministic artifact recovery.
+
+---
+
+## Quick Start: Terminal-First CLI (`ml-lineage`)
+
+Install ML Lineage Studio into your virtual environment in editable mode:
+
+```bash
+# Clone and install
+git clone https://github.com/nirmalprathmesh/ML_Lineage.git
+cd ML_Lineage
+pip install -e .
+
+# Verify installation from any directory
+ml-lineage --help
+```
+
+### Multi-Project Workflows
+
+ML Lineage Studio supports arbitrary external ML repositories without Wine-specific assumptions.
+
+```bash
+# 1. Initialize ML Lineage tracking in an external project
+cd /path/to/my-ml-project
+ml-lineage init --name churn-model --yes
+
+# 2. Or register an existing project directory under an alias
+ml-lineage register /path/to/nlp-project --alias nlp-bert --description "Fine-tuned BERT classifier"
+
+# 3. List all registered projects across your machine
+ml-lineage projects
+
+# 4. Run diagnostics or inspect tracking from anywhere
+ml-lineage doctor --project nlp-bert
+ml-lineage status --project nlp-bert
+ml-lineage runs --project nlp-bert
+ml-lineage history --project nlp-bert
+
+# 5. Generate provenance reports in JSON or GitHub Markdown
+ml-lineage report --project nlp-bert --format markdown --output reports/provenance.md
+
+# 6. Unregister a project safely (leaves project files on disk untouched)
+ml-lineage unregister nlp-bert --yes
+```
+
+### Configuration Precedence Hierarchy
+
+Target project resolution and tracking parameters follow strict, deterministic precedence:
+
+| Priority | Level | Description |
+|:---:|:---|:---|
+| **1** | **Explicit CLI Flags** | `--project <alias>`, `--path <dir>`, `--experiment <name>` |
+| **2** | **Environment Variables** | `ML_LINEAGE_PROJECT`, `ML_LINEAGE_PATH`, `MLFLOW_TRACKING_URI`, `MLFLOW_EXPERIMENT_NAME` |
+| **3** | **Project `.ml-lineage.yaml`** | Project-scoped overrides (`mlflow.tracking_uri`, `params.file`, etc.) |
+| **4** | **Project `params.yaml` / Registry** | Legacy project parameters and registered alias configurations |
+| **5** | **Defaults** | `sqlite:///<project_root>/mlflow.db`, `ML_Lineage_Experiments`, upward discovery from CWD |
+
 ---
 
 ## The Problem It Solves

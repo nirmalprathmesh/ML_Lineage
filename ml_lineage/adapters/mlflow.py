@@ -90,13 +90,10 @@ class MLflowAdapter:
 
     def get_run_details(self, run: Any, tag_map: dict[str, str] | None = None) -> dict[str, Any]:
         """Extract a structured dict of run parameters, metrics, tags, and environment."""
-        if tag_map is None:
-            tag_map = WINE_DVC_TAG_MAP
-
         client = self.get_client()
-        tags = run.data.tags
-        params = run.data.params
-        metrics = run.data.metrics
+        tags = run.data.tags or {}
+        params = run.data.params or {}
+        metrics = run.data.metrics or {}
 
         try:
             experiment = client.get_experiment(run.info.experiment_id)
@@ -104,11 +101,49 @@ class MLflowAdapter:
         except Exception:
             exp_name = run.info.experiment_id
 
-        start_ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(run.info.start_time / 1000))
+        start_ts = (
+            time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(run.info.start_time / 1000))
+            if run.info.start_time else "N/A"
+        )
         end_ts = (
             time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(run.info.end_time / 1000))
             if run.info.end_time else "In Progress"
         )
+
+        # Dynamic and standard environment tags
+        env_dict = {
+            "python_version": tags.get("env.python_version", "unavailable"),
+            "os_platform": tags.get("env.os_platform", "unavailable"),
+            "scikit_learn": tags.get("env.scikit_learn", "unavailable"),
+            "pandas": tags.get("env.pandas", "unavailable"),
+            "numpy": tags.get("env.numpy", "unavailable"),
+            "dvc": tags.get("env.dvc", "unavailable"),
+            "mlflow": tags.get("env.mlflow", "unavailable"),
+        }
+        for k, v in tags.items():
+            if k.startswith("env."):
+                short_k = k[4:]
+                if short_k not in env_dict or env_dict[short_k] == "unavailable":
+                    env_dict[short_k] = v
+
+        # Artifact / DVC hashes
+        dvc_hashes = {}
+        if tag_map is not None:
+            for tag_key in tag_map:
+                dvc_hashes[tag_key] = tags.get(tag_key, "unavailable")
+        else:
+            has_wine_tags = any(k in tags for k in WINE_DVC_TAG_MAP)
+            if has_wine_tags:
+                for tag_key in WINE_DVC_TAG_MAP:
+                    dvc_hashes[tag_key] = tags.get(tag_key, "unavailable")
+
+            for k, v in tags.items():
+                if k.startswith(("dvc.hash.", "artifact.hash.", "hash.")):
+                    dvc_hashes[k] = v
+
+            if not dvc_hashes:
+                for tag_key in WINE_DVC_TAG_MAP:
+                    dvc_hashes[tag_key] = tags.get(tag_key, "unavailable")
 
         return {
             "run_id": run.info.run_id,
@@ -123,21 +158,10 @@ class MLflowAdapter:
                 "branch": tags.get("git.branch", "unavailable"),
                 "is_dirty": tags.get("git.is_dirty", "unavailable"),
             },
-            "environment": {
-                "python_version": tags.get("env.python_version", "unavailable"),
-                "os_platform": tags.get("env.os_platform", "unavailable"),
-                "scikit_learn": tags.get("env.scikit_learn", "unavailable"),
-                "pandas": tags.get("env.pandas", "unavailable"),
-                "numpy": tags.get("env.numpy", "unavailable"),
-                "dvc": tags.get("env.dvc", "unavailable"),
-                "mlflow": tags.get("env.mlflow", "unavailable"),
-            },
+            "environment": env_dict,
             "parameters": params,
             "metrics": metrics,
-            "dvc_hashes": {
-                tag_key: tags.get(tag_key, "unavailable")
-                for tag_key in tag_map
-            },
+            "dvc_hashes": dvc_hashes,
         }
 
     def get_runs_dataframe(self, runs: list | None = None) -> pd.DataFrame:
@@ -210,11 +234,16 @@ class MLflowAdapter:
         if not run_a or not run_b:
             return {"error": f"One or both runs ('{run_id_a}', '{run_id_b}') could not be resolved."}
 
-        if tag_map is None:
-            tag_map = WINE_DVC_TAG_MAP
-
         det_a = self.get_run_details(run_a, tag_map=tag_map)
         det_b = self.get_run_details(run_b, tag_map=tag_map)
+
+        if tag_map is None:
+            has_wine_tags = any(k in det_a["dvc_hashes"] for k in WINE_DVC_TAG_MAP) or any(k in det_b["dvc_hashes"] for k in WINE_DVC_TAG_MAP)
+            if has_wine_tags:
+                tag_map = WINE_DVC_TAG_MAP
+            else:
+                all_keys = sorted(set(det_a["dvc_hashes"].keys()) | set(det_b["dvc_hashes"].keys()))
+                tag_map = {k: k.replace("dvc.hash.", "").replace("artifact.hash.", "").replace("hash.", "") for k in all_keys}
 
         metrics_comparison = []
         all_metrics = sorted(set(det_a["metrics"].keys()) | set(det_b["metrics"].keys()))

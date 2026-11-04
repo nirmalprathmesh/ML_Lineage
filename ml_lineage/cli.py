@@ -110,8 +110,11 @@ class CliState:
 
         1. Explicit --project <alias> (looked up in ProjectRegistry)
         2. Explicit --path <dir>
-        3. Current working directory discovery (search parents)
+        3. Environment variable ML_LINEAGE_PROJECT (alias in ProjectRegistry)
+        4. Environment variable ML_LINEAGE_PATH (explicit directory path)
+        5. Current working directory discovery (search parents)
         """
+        # Precedence 1: Explicit CLI --project
         if self.project_alias:
             entry = self.registry.get(self.project_alias)
             if not entry:
@@ -120,19 +123,46 @@ class CliState:
                 if registered:
                     msg += f" Available projects: {', '.join(registered)}"
                 else:
-                    msg += " No projects are currently registered. Use 'ml-lineage init' to register one."
+                    msg += " No projects are currently registered. Use 'ml-lineage register' or 'ml-lineage init' to register one."
                 self.fail(msg, code=1)
             target_path = Path(entry["path"])
             if not target_path.is_dir():
                 self.fail(f"Registered path for alias '{self.project_alias}' does not exist: {target_path}", code=1)
             return ProjectContext.from_path(target_path)
 
+        # Precedence 2: Explicit CLI --path
         if self.raw_path:
             p = Path(self.raw_path).resolve()
             if not p.is_dir():
                 self.fail(f"Specified target path does not exist or is not a directory: {p}", code=1)
             return ProjectContext.from_path(p)
 
+        # Precedence 3: Environment variable ML_LINEAGE_PROJECT
+        env_alias = os.environ.get("ML_LINEAGE_PROJECT")
+        if env_alias:
+            entry = self.registry.get(env_alias)
+            if not entry:
+                registered = list(self.registry.list_projects().keys())
+                msg = f"Project alias '{env_alias}' (from ML_LINEAGE_PROJECT) not found in registry."
+                if registered:
+                    msg += f" Available projects: {', '.join(registered)}"
+                else:
+                    msg += " No projects are currently registered."
+                self.fail(msg, code=1)
+            target_path = Path(entry["path"])
+            if not target_path.is_dir():
+                self.fail(f"Registered path for alias '{env_alias}' does not exist: {target_path}", code=1)
+            return ProjectContext.from_path(target_path)
+
+        # Precedence 4: Environment variable ML_LINEAGE_PATH
+        env_path = os.environ.get("ML_LINEAGE_PATH")
+        if env_path:
+            p = Path(env_path).resolve()
+            if not p.is_dir():
+                self.fail(f"Path from ML_LINEAGE_PATH does not exist or is not a directory: {p}", code=1)
+            return ProjectContext.from_path(p)
+
+        # Precedence 5: Discovered from CWD
         try:
             return ProjectContext.from_path(search_parents=True)
         except Exception as e:
@@ -537,9 +567,21 @@ def cmd_status(
     finished_runs = [r for r in runs if r.info.status == "FINISHED"]
     latest_run = runs[0] if runs else None
 
+    latest_primary_name = "accuracy"
+    latest_primary_val = None
+    if latest_run and latest_run.data.metrics:
+        for m in ("accuracy", "f1_score", "loss", "rmse", "mae"):
+            if m in latest_run.data.metrics:
+                latest_primary_name = m
+                latest_primary_val = latest_run.data.metrics[m]
+                break
+        if latest_primary_val is None:
+            latest_primary_name, latest_primary_val = next(iter(latest_run.data.metrics.items()))
+
     status_data = {
         "project": {
             "root": str(context.root),
+            "name": context.project_name,
             "alias": registered_alias,
         },
         "git": git_info,
@@ -556,6 +598,8 @@ def cmd_status(
                 "run_id": latest_run.info.run_id if latest_run else None,
                 "status": latest_run.info.status if latest_run else None,
                 "accuracy": latest_run.data.metrics.get("accuracy") if latest_run else None,
+                "primary_metric": {"name": latest_primary_name, "value": latest_primary_val} if latest_run else None,
+                "metrics": latest_run.data.metrics if latest_run else {},
             } if latest_run else None,
         },
     }
@@ -589,8 +633,14 @@ def cmd_status(
         click.echo(f"  Total Runs: {len(runs)} (Finished: {len(finished_runs)})")
         if latest_run:
             acc = latest_run.data.metrics.get("accuracy")
-            acc_str = f"{acc:.4f}" if isinstance(acc, float) else str(acc or "N/A")
-            click.echo(f"  Latest Run: {latest_run.info.run_id[:10]}... [Status: {latest_run.info.status}, Acc: {acc_str}]")
+            if acc is not None:
+                acc_str = f"{acc:.4f}" if isinstance(acc, float) else str(acc)
+                click.echo(f"  Latest Run: {latest_run.info.run_id[:10]}... [Status: {latest_run.info.status}, Acc: {acc_str}]")
+            elif latest_primary_val is not None:
+                pm_str = f"{latest_primary_val:.4f}" if isinstance(latest_primary_val, float) else str(latest_primary_val)
+                click.echo(f"  Latest Run: {latest_run.info.run_id[:10]}... [Status: {latest_run.info.status}, {latest_primary_name}: {pm_str}]")
+            else:
+                click.echo(f"  Latest Run: {latest_run.info.run_id[:10]}... [Status: {latest_run.info.status}]")
 
     state.output(status_data, _fmt)
 
@@ -634,9 +684,22 @@ def cmd_runs(
 
     import time
     for r in runs:
-        tags = r.data.tags
-        metrics = r.data.metrics
+        tags = r.data.tags or {}
+        metrics = r.data.metrics or {}
         accuracy = metrics.get("accuracy")
+
+        # Discover primary metric
+        primary_name = "accuracy"
+        primary_val = accuracy
+        if primary_val is None and metrics:
+            for m in ("f1_score", "loss", "rmse", "mae"):
+                if m in metrics:
+                    primary_name = m
+                    primary_val = metrics[m]
+                    break
+            if primary_val is None:
+                primary_name, primary_val = next(iter(metrics.items()))
+
         git_sha = tags.get("git.commit_sha", "N/A")[:10]
         ts = ""
         if r.info.start_time:
@@ -649,6 +712,8 @@ def cmd_runs(
             "experiment": exp_names.get(r.info.experiment_id, r.info.experiment_id),
             "git_commit": git_sha,
             "accuracy": accuracy,
+            "primary_metric": {"name": primary_name, "value": primary_val},
+            "metrics": metrics,
             "timestamp": ts,
         })
 
@@ -657,12 +722,19 @@ def cmd_runs(
             click.echo(f"No runs found in tracking store ({context.tracking_uri}).")
             return
 
+        has_any_acc = any(row["accuracy"] is not None for row in runs_data)
+        metric_col_name = "ACCURACY" if has_any_acc else "METRIC"
+
         click.echo("=" * 95)
-        click.echo(f"  {'RUN ID':<36}  {'STATUS':<10}  {'EXPERIMENT':<20}  {'GIT SHA':<10}  {'ACCURACY':<8}  {'TIMESTAMP'}")
+        click.echo(f"  {'RUN ID':<36}  {'STATUS':<10}  {'EXPERIMENT':<20}  {'GIT SHA':<10}  {metric_col_name:<8}  {'TIMESTAMP'}")
         click.echo("=" * 95)
 
         for row in runs_data:
-            acc_display = f"{row['accuracy']:.4f}" if isinstance(row['accuracy'], float) else str(row['accuracy'] or "N/A")
+            if has_any_acc:
+                acc_display = f"{row['accuracy']:.4f}" if isinstance(row['accuracy'], float) else str(row['accuracy'] or "N/A")
+            else:
+                pm = row["primary_metric"]
+                acc_display = f"{pm['value']:.4f}" if isinstance(pm["value"], float) else str(pm["value"] or "N/A")
             click.echo(
                 f"  {row['run_id']:<36}  {row['status']:<10}  {row['experiment'][:20]:<20}  "
                 f"{row['git_commit']:<10}  {acc_display:<8}  {row['timestamp']}"
@@ -1277,6 +1349,392 @@ def cmd_lineage(
         click.echo()
 
     state.output(data, _fmt)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subcommand: register
+# ─────────────────────────────────────────────────────────────────────────────
+@main.command(name="register", help="Register an existing ML project directory under a unique alias.")
+@click.argument("target_path", type=click.Path(file_okay=False, dir_okay=True), required=False, default=None)
+@click.option("--alias", "-a", type=str, required=True, help="Unique alias for the project (lowercase letters, numbers, hyphens, underscores).")
+@click.option("--description", "-d", type=str, default="", help="Optional description of the project.")
+@click.option("--overwrite", is_flag=True, help="Allow overwriting an existing alias or path registration.")
+@common_options
+@pass_state
+def cmd_register(
+    state: CliState,
+    target_path: str | None,
+    alias: str,
+    description: str,
+    overwrite: bool,
+    path: str | None,
+    project: str | None,
+    json_output: bool,
+    verbose: bool,
+):
+    """Register an ML project directory in the global registry."""
+    state.update(path=path, project=project, json_output=json_output, verbose=verbose)
+
+    chosen_path = target_path or state.raw_path or str(Path.cwd())
+    resolved = Path(chosen_path).resolve()
+
+    if not resolved.is_dir():
+        state.fail(f"Target project path does not exist or is not a directory: {resolved}", code=1)
+
+    try:
+        entry = state.registry.register(
+            alias=alias,
+            project_path=resolved,
+            description=description,
+            overwrite=overwrite,
+        )
+    except RegistryConflictError as rce:
+        state.fail(str(rce), code=1)
+    except RegistryError as re:
+        state.fail(str(re), code=1)
+    except Exception as e:
+        state.fail(f"Failed to register project: {e}", code=1)
+
+    def _fmt():
+        click.echo(f"[OK] Project successfully registered:")
+        click.echo(f"  Alias       : {entry['alias']}")
+        click.echo(f"  Path        : {entry['path']}")
+        if entry.get("description"):
+            click.echo(f"  Description : {entry['description']}")
+        click.echo(f"  Registry    : {state.registry.registry_file}")
+
+    state.output(entry, _fmt)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subcommand: unregister
+# ─────────────────────────────────────────────────────────────────────────────
+@main.command(name="unregister", help="Unregister a project alias from the registry.")
+@click.argument("alias", type=str, required=True)
+@click.option("--yes", "-y", is_flag=True, help="Confirm unregistration without interactive prompt.")
+@common_options
+@pass_state
+def cmd_unregister(
+    state: CliState,
+    alias: str,
+    yes: bool,
+    path: str | None,
+    project: str | None,
+    json_output: bool,
+    verbose: bool,
+):
+    """Safely unregister a project from the registry."""
+    state.update(path=path, project=project, json_output=json_output, verbose=verbose)
+    clean_alias = str(alias).strip().lower()
+
+    existing = state.registry.get(clean_alias)
+    if not existing:
+        registered = list(state.registry.list_projects().keys())
+        msg = f"Project alias '{clean_alias}' is not registered."
+        if registered:
+            msg += f" Available projects: {', '.join(registered)}"
+        state.fail(msg, code=1)
+
+    # Confirmation safety: require explicit --yes if non-interactive or ask user
+    if not yes and not state.json_output:
+        try:
+            confirmed = click.confirm(
+                f"Are you sure you want to unregister project '{clean_alias}' ({existing.get('path')})?",
+                default=False,
+            )
+        except Exception:
+            confirmed = False
+
+        if not confirmed:
+            state.fail(f"Unregistration cancelled for '{clean_alias}'.", code=2)
+
+    try:
+        removed = state.registry.unregister(clean_alias)
+    except Exception as e:
+        state.fail(f"Failed to unregister project '{clean_alias}': {e}", code=1)
+
+    result = {
+        "status": "unregistered" if removed else "not_found",
+        "alias": clean_alias,
+        "path": existing.get("path"),
+    }
+
+    def _fmt():
+        click.echo(f"[OK] Project '{clean_alias}' unregistered successfully.")
+        click.echo(f"     Path: {existing.get('path')}")
+        click.echo("     (Project files on disk remain untouched)")
+
+    state.output(result, _fmt)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subcommand: history
+# ─────────────────────────────────────────────────────────────────────────────
+@main.command(name="history", help="Show chronological timeline and provenance history of runs.")
+@click.option("--experiment", "-e", type=str, help="Filter history by experiment name or ID.")
+@click.option("--limit", "-n", type=int, default=30, help="Maximum number of historical runs to display (default: 30).")
+@common_options
+@pass_state
+def cmd_history(
+    state: CliState,
+    experiment: str | None,
+    limit: int,
+    path: str | None,
+    project: str | None,
+    json_output: bool,
+    verbose: bool,
+):
+    """Display chronological history and lineage timeline for the target project."""
+    state.update(path=path, project=project, json_output=json_output, verbose=verbose)
+    context = state.get_project_context()
+    mlflow_adapter = MLflowAdapter(context)
+
+    try:
+        runs = mlflow_adapter.fetch_all_runs(experiment_filter=experiment)
+    except Exception as e:
+        state.fail(f"Failed to query run history from '{context.tracking_uri}': {e}", code=1)
+
+    if limit and limit > 0:
+        runs = runs[:limit]
+
+    client = mlflow_adapter.get_client()
+    try:
+        exp_names = {e.experiment_id: e.name for e in client.search_experiments()}
+    except Exception:
+        exp_names = {}
+
+    import time
+    history_entries = []
+    for r in runs:
+        tags = r.data.tags or {}
+        metrics = r.data.metrics or {}
+        params = r.data.params or {}
+
+        # Primary metric discovery
+        primary_metric_name = "N/A"
+        primary_metric_val = None
+        for m in ("accuracy", "f1_score", "loss", "rmse", "mae", "roc_auc"):
+            if m in metrics:
+                primary_metric_name = m
+                primary_metric_val = metrics[m]
+                break
+        if primary_metric_val is None and metrics:
+            k, v = next(iter(metrics.items()))
+            primary_metric_name = k
+            primary_metric_val = v
+
+        artifact_count = sum(1 for k in tags if k.startswith(("dvc.hash.", "artifact.hash.", "hash.")))
+
+        ts = ""
+        if r.info.start_time:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(r.info.start_time / 1000))
+
+        history_entries.append({
+            "run_id": r.info.run_id,
+            "short_id": r.info.run_id[:8],
+            "status": r.info.status,
+            "experiment": exp_names.get(r.info.experiment_id, r.info.experiment_id),
+            "timestamp": ts,
+            "git_commit": tags.get("git.commit_sha", "N/A")[:10],
+            "git_branch": tags.get("git.branch", "N/A"),
+            "git_dirty": tags.get("git.is_dirty", "N/A"),
+            "primary_metric": {
+                "name": primary_metric_name,
+                "value": primary_metric_val,
+            },
+            "artifact_tags_count": artifact_count,
+            "parameters_count": len(params),
+        })
+
+    def _fmt():
+        if not history_entries:
+            click.echo(f"No run history found in tracking store ({context.tracking_uri}).")
+            return
+
+        click.echo("=" * 105)
+        click.echo(f"  {'RUN ID':<10}  {'STATUS':<10}  {'TIMESTAMP':<22}  {'GIT SHA':<10}  {'BRANCH':<12}  {'PRIMARY METRIC':<20}  {'ARTIFACTS'}")
+        click.echo("=" * 105)
+        for h in history_entries:
+            pm = h["primary_metric"]
+            pm_str = f"{pm['name']}={pm['value']:.4f}" if isinstance(pm["value"], float) else (f"{pm['name']}={pm['value']}" if pm["value"] is not None else "None")
+            click.echo(
+                f"  {h['short_id']:<10}  {h['status']:<10}  {h['timestamp']:<22}  {h['git_commit']:<10}  {h['git_branch']:<12}  {pm_str:<20}  {h['artifact_tags_count']} tagged"
+            )
+        click.echo("-" * 105)
+        click.echo(f"Total: {len(history_entries)} run(s) displayed.")
+
+    state.output(history_entries, _fmt)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subcommand: report
+# ─────────────────────────────────────────────────────────────────────────────
+@main.command(name="report", help="Generate a comprehensive provenance and lineage report.")
+@click.argument("run_id_or_prefix", required=False, default=None)
+@click.option("--output", "-o", type=click.Path(dir_okay=False, writable=True), default=None, help="Save report to specified file path.")
+@click.option("--format", "report_format", type=click.Choice(["text", "json", "markdown"], case_sensitive=False), default="text", help="Report format (default: text).")
+@common_options
+@pass_state
+def cmd_report(
+    state: CliState,
+    run_id_or_prefix: str | None,
+    output: str | None,
+    report_format: str,
+    path: str | None,
+    project: str | None,
+    json_output: bool,
+    verbose: bool,
+):
+    """Generate end-to-end provenance and artifact lineage report."""
+    state.update(path=path, project=project, json_output=json_output, verbose=verbose)
+    context = state.get_project_context()
+
+    target_run_id = run_id_or_prefix
+    if not target_run_id:
+        mlflow_adapter = MLflowAdapter(context)
+        try:
+            runs = mlflow_adapter.fetch_all_runs()
+            if not runs:
+                state.fail(f"No MLflow runs found in tracking store ({context.tracking_uri}) to generate report.", code=1)
+            target_run_id = runs[0].info.run_id
+        except Exception as e:
+            state.fail(f"Failed to fetch runs from '{context.tracking_uri}': {e}", code=1)
+
+    try:
+        report = trace_run_lineage(context, target_run_id)
+    except ValueError as e:
+        state.fail(str(e), code=1)
+    except Exception as e:
+        state.fail(f"Failed to trace lineage for '{target_run_id}': {e}", code=1)
+
+    data = report.to_dict()
+
+    def _generate_markdown() -> str:
+        md = []
+        md.append(f"# ML Lineage Provenance Report")
+        md.append(f"**Generated:** {report.report_generated_at}  ")
+        md.append(f"**Project:** {context.project_name} (`{context.root}`)  ")
+        md.append(f"**Run ID:** `{report.run_id}`  ")
+        md.append(f"**Experiment:** {report.experiment_name} (ID: {report.experiment_id})  ")
+        md.append(f"**Status:** {report.status}  ")
+        md.append(f"**Timeline:** {report.start_time} &rarr; {report.end_time}  \n")
+
+        md.append("## Git Provenance")
+        g = report.git_provenance
+        md.append(f"- **Commit SHA:** `{g.get('commit_sha', 'unavailable')}`")
+        md.append(f"- **Branch:** `{g.get('branch', 'unavailable')}`")
+        md.append(f"- **Dirty Working Tree:** `{g.get('is_dirty', 'unavailable')}`\n")
+
+        if report.metrics:
+            md.append("## Metrics")
+            md.append("| Metric | Value |")
+            md.append("|---|---|")
+            for k, v in sorted(report.metrics.items()):
+                v_str = f"{v:.4f}" if isinstance(v, float) else str(v)
+                md.append(f"| `{k}` | {v_str} |")
+            md.append("")
+
+        if report.parameters:
+            md.append("## Parameters")
+            md.append("| Parameter | Value |")
+            md.append("|---|---|")
+            for k, v in sorted(report.parameters.items()):
+                md.append(f"| `{k}` | `{v}` |")
+            md.append("")
+
+        md.append("## Pipeline Summary")
+        p = data.get("pipeline_summary", {})
+        md.append(f"- **Pipeline Available:** {p.get('available')}")
+        md.append(f"- **Total Stages:** {p.get('total_stages')}")
+        md.append(f"- **Observed Stages:** {p.get('observed_stages')}")
+        md.append(f"- **Inferred Stages:** {p.get('inferred_stages')}")
+        md.append(f"- **Unavailable Stages:** {p.get('unavailable_stages')}\n")
+
+        if report.stages:
+            md.append("## Lineage Stages")
+            for s in report.stages:
+                md.append(f"### Stage: `{s.stage_name}`")
+                md.append(f"- **Evidence Level:** `{s.evidence_level.value}`")
+                md.append(f"- **Reason:** {s.evidence_reason}")
+                if s.cmd:
+                    md.append(f"- **Command:** `{s.cmd}`")
+                if s.dependencies:
+                    md.append(f"- **Dependencies:** {', '.join(f'`{d}`' for d in s.dependencies)}")
+                if s.outputs:
+                    md.append("#### Artifacts:")
+                    md.append("| Artifact | Workspace Status | Hash | DVC Cache |")
+                    md.append("|---|---|---|---|")
+                    for o in s.outputs:
+                        h_disp = o.get("recorded_hash") or o.get("computed_hash") or "N/A"
+                        c_disp = "Available" if o.get("dvc_cache_available") else "Missing"
+                        md.append(f"| `{o.get('path')}` | `{o.get('workspace_status')}` | `{h_disp[:10] if len(h_disp) > 10 else h_disp}` | {c_disp} |")
+                md.append("")
+
+        v = report.verification_summary
+        md.append("## Verification Summary")
+        md.append(f"- **Integrity Verified:** {'YES' if v.get('is_lineage_verified') else 'NO'}")
+        md.append(f"- **Total Versioned Artifacts:** {v.get('versioned_artifacts_tracked')}")
+        md.append(f"- **Verified in Workspace:** {v.get('verified_in_workspace')}")
+        md.append(f"- **Hash Mismatches:** {v.get('workspace_hash_mismatches')}")
+        md.append(f"- **Missing in Workspace:** {v.get('workspace_missing')}")
+        md.append(f"- **Recoverable from DVC:** {v.get('recoverable_from_dvc')}")
+        return "\n".join(md)
+
+    if output:
+        out_path = Path(output).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                if report_format == "json" or state.json_output:
+                    json.dump(data, f, indent=2)
+                elif report_format == "markdown":
+                    f.write(_generate_markdown())
+                else:
+                    f.write(f"ML Lineage Provenance Report for {report.run_id}\n")
+                    f.write(f"Generated: {report.report_generated_at}\n\n")
+                    f.write(json.dumps(data, indent=2))
+            if not state.json_output:
+                click.echo(f"[OK] Report written to: {out_path}")
+        except Exception as e:
+            state.fail(f"Failed to write report to '{out_path}': {e}", code=1)
+
+    if state.json_output or report_format == "json":
+        click.echo(json.dumps(data, indent=2, sort_keys=True))
+    elif report_format == "markdown":
+        click.echo(_generate_markdown())
+    else:
+        click.echo("=" * 80)
+        click.echo(f"  RUN PROVENANCE & LINEAGE REPORT")
+        click.echo("=" * 80)
+        click.echo(f"Project            : {context.project_name} ({context.root})")
+        click.echo(f"Run ID             : {report.run_id}")
+        click.echo(f"Experiment         : {report.experiment_name} (id={report.experiment_id})")
+        click.echo(f"Status             : {report.status}")
+        click.echo(f"Start / End        : {report.start_time}  -->  {report.end_time}")
+        click.echo()
+
+        click.echo("Git Provenance:")
+        g = report.git_provenance
+        click.echo(f"  Commit SHA        : {g.get('commit_sha', 'unavailable')}")
+        click.echo(f"  Branch            : {g.get('branch', 'unavailable')}")
+        click.echo(f"  Dirty Working Tree: {g.get('is_dirty', 'unavailable')}")
+        click.echo()
+
+        if report.metrics:
+            click.echo("Metrics:")
+            for k, val in sorted(report.metrics.items()):
+                v_str = f"{val:.4f}" if isinstance(val, float) else str(val)
+                click.echo(f"  {k:<24} : {v_str}")
+            click.echo()
+
+        v = report.verification_summary
+        click.echo("Verification Summary:")
+        click.echo(f"  Integrity Verified: {'YES' if v.get('is_lineage_verified') else 'NO'}")
+        click.echo(f"  Total Artifacts   : {v.get('versioned_artifacts_tracked')}")
+        click.echo(f"  Verified in WS    : {v.get('verified_in_workspace')}")
+        click.echo(f"  Mismatches        : {v.get('workspace_hash_mismatches')}")
+        click.echo(f"  Missing in WS     : {v.get('workspace_missing')}")
+        click.echo("-" * 80)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

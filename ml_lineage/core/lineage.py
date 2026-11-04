@@ -349,8 +349,11 @@ def trace_run_lineage(context: ProjectContext, run_id_or_prefix: str) -> RunLine
     if not stage_reports:
         generic_outs: list[dict[str, Any]] = []
         for tag_k, tag_v in tags.items():
-            if tag_k.startswith("dvc.hash.") or tag_k.startswith("artifact.hash."):
-                mapped_path = WINE_DVC_TAG_MAP.get(tag_k, tag_k.replace("dvc.hash.", "").replace("artifact.hash.", ""))
+            if tag_k.startswith(("dvc.hash.", "artifact.hash.", "hash.")):
+                mapped_path = WINE_DVC_TAG_MAP.get(
+                    tag_k,
+                    tag_k.replace("dvc.hash.", "").replace("artifact.hash.", "").replace("hash.", "")
+                )
                 prov = check_artifact_provenance(
                     context,
                     mapped_path,
