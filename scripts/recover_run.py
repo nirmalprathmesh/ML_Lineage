@@ -336,7 +336,27 @@ def cmd_recover(run_id_prefix: str, dry_run: bool, verify_only: bool):
             recovery_results[rel_path] = "would_restore"
             continue
 
-        # Restore
+        # Restore with backup protection and rollback
+        backup_path = None
+        orig_hash = None
+        if os.path.exists(abs_path):
+            try:
+                orig_hash = _md5(abs_path)
+                ts_str = time.strftime("%Y%m%d_%H%M%S")
+                backup_dir = os.path.join(str(DEFAULT_CONTEXT.root), ".ml-lineage", "backups", f"recover_{run_id[:8]}_{ts_str}")
+                backup_path = os.path.join(backup_dir, rel_path)
+                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                shutil.copy2(abs_path, backup_path)
+                if _md5(backup_path) != orig_hash:
+                    print(err(f"Backup verification failed for {abs_path}! Aborting restore."))
+                    recovery_results[rel_path] = "backup_failed"
+                    continue
+                print(info(f"Created verified backup: {backup_path}"))
+            except Exception as be:
+                print(err(f"Failed to create backup for {abs_path}: {be}"))
+                recovery_results[rel_path] = "backup_failed"
+                continue
+
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
         shutil.copy2(source_path, abs_path)
         # Verify restored file
@@ -347,6 +367,13 @@ def cmd_recover(run_id_prefix: str, dry_run: bool, verify_only: bool):
         else:
             print(err(f"Post-restore verification FAILED for {abs_path}! "
                       f"Expected {expected_hash}, got {restored_hash}."))
+            # Rollback
+            if backup_path and os.path.exists(backup_path):
+                shutil.copy2(backup_path, abs_path)
+                print(warn(f"Rollback: restored original file from {backup_path}"))
+            elif not orig_hash and os.path.exists(abs_path):
+                os.remove(abs_path)
+                print(warn(f"Rollback: deleted newly created file {abs_path}"))
             recovery_results[rel_path] = "restore_verification_failed"
 
     # ── 3. Lineage manifest from MLflow artifacts ────────────────────────────
@@ -523,6 +550,12 @@ Examples:
         action="store_true",
         dest="verify_only",
         help="Verify artifact hashes without restoring any files.",
+    )
+    p.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        dest="yes",
+        help="Skip interactive confirmation.",
     )
     return p
 

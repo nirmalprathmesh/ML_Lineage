@@ -74,6 +74,37 @@ class GitAdapter:
             return bool(out)
         return False
 
+    def commit_exists(self, commit_sha: str | None) -> bool:
+        """Check whether the given commit SHA exists locally in the repository."""
+        if not commit_sha or commit_sha == "unavailable":
+            return False
+        code, _, _ = self.run_cmd(["cat-file", "-e", f"{commit_sha}^{{commit}}"])
+        return code == 0
+
+    def get_dirty_files(self) -> list[str]:
+        """Return relative paths of files with uncommitted (staged, unstaged, untracked) changes."""
+        code, out, _ = self.run_cmd(["status", "--porcelain"])
+        if code != 0 or not out:
+            return []
+        dirty: list[str] = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Format: 'XY path' or 'XY "path"' or 'XY path1 -> path2'
+            parts = line[2:].strip().split(" -> ")
+            target_path = parts[-1].strip().strip('"')
+            dirty.append(target_path.replace("\\", "/"))
+        return dirty
+
+    def is_file_dirty(self, rel_path: str) -> bool:
+        """Check if a specific relative file path has uncommitted changes."""
+        norm_target = rel_path.replace("\\", "/").lstrip("/")
+        for f in self.get_dirty_files():
+            if f.lstrip("/") == norm_target:
+                return True
+        return False
+
     def get_git_info(self) -> dict[str, Any]:
         """Gather commit SHA, branch, and working-tree dirty status for provenance recording."""
         return {

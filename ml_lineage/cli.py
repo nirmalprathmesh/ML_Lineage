@@ -54,6 +54,16 @@ from ml_lineage.core.context import ProjectContext
 from ml_lineage.core.registry import ProjectRegistry, RegistryError, RegistryConflictError
 from ml_lineage.core.pipeline import PipelineDAG, parse_dvc_pipeline
 from ml_lineage.core.lineage import trace_run_lineage, EvidenceLevel
+from ml_lineage.core.verification import verify_run_artifacts
+from ml_lineage.core.recovery import (
+    RecoveryService,
+    RecoveryPlan,
+    RecoveryResult,
+    RecoveryError,
+    BackupError,
+    RecoveryExecutionError,
+    PathTraversalError,
+)
 from ml_lineage.adapters.git import GitAdapter
 from ml_lineage.adapters.dvc import DVCAdapter
 from ml_lineage.adapters.mlflow import MLflowAdapter
@@ -889,11 +899,13 @@ def cmd_pipeline(
         sys.exit(1)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Subcommand: recover (Historical run recovery with optional isolated worktree)
+# Subcommand: recover (Historical run recovery with safe backups and git safety)
 # ─────────────────────────────────────────────────────────────────────────────
-@main.command(name="recover", help="Recover artifacts for a run, optionally into an isolated git worktree.")
+@main.command(name="recover", help="Recover artifacts for a run, with pre-flight safety checks and backups.")
 @click.argument("run_id_or_prefix", metavar="RUN_ID")
-@click.option("--dry-run", is_flag=True, help="Show actions without modifying anything.")
+@click.option("--dry-run", is_flag=True, help="Preview recovery plan and file operations without modifying any files.")
+@click.option("--output", "-o", "output_dir", type=click.Path(file_okay=False, dir_okay=True), default=None, help="Recover artifacts into an isolated directory instead of active workspace.")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Confirm recovery execution non-interactively.")
 @click.option("--verify-only", is_flag=True, help="Only verify artifact hashes, no restoration.")
 @click.option("--worktree", is_flag=True, help="Recover into a temporary git worktree instead of the active workspace.")
 @common_options
@@ -902,6 +914,8 @@ def cmd_recover(
     state: CliState,
     run_id_or_prefix: str,
     dry_run: bool,
+    output_dir: str | None,
+    yes: bool,
     verify_only: bool,
     worktree: bool,
     path: str | None,
@@ -909,54 +923,249 @@ def cmd_recover(
     json_output: bool,
     verbose: bool,
 ):
-    """Wrapper around the historic `scripts/recover_run.py` functionality.
-    Provides an optional isolated recovery using `git worktree` to protect the active workspace.
+    """Safely recover historical experiment artifacts with backup protection,
+    conflict detection, Git safety validation, and transactional rollback.
     """
     state.update(path=path, project=project, json_output=json_output, verbose=verbose)
     ctx = state.get_project_context()
 
-    # Import the existing recovery script as a module
-    try:
-        from scripts import recover_run as rr
-    except Exception as e:
-        state.fail(f"Failed to import recovery module: {e}", code=1)
-
-    # Resolve the run to obtain the commit SHA for optional worktree creation
-    mlflow_adapter = MLflowAdapter(ctx)
-    try:
+    # If verify-only requested via recover, delegate to verification
+    if verify_only:
+        mlflow_adapter = MLflowAdapter(ctx)
         run = mlflow_adapter.resolve_run(run_id_or_prefix)
-    except Exception as e:
-        state.fail(f"Failed to resolve run '{run_id_or_prefix}': {e}", code=1)
+        if not run:
+            state.fail(f"Run '{run_id_or_prefix}' not found or prefix ambiguous.", code=1)
+        results = verify_run_artifacts(ctx, run)
+        all_ok = all(
+            item["status"].startswith("✅") or item.get("workspace_hash") == item.get("expected_hash")
+            for item in results
+        )
+        if state.json_output:
+            state.output({
+                "run_id": run.info.run_id,
+                "all_verified": all_ok,
+                "artifacts": results,
+            })
+        else:
+            click.echo(f"\nArtifact Verification for Run {run.info.run_id[:8]} ({run.info.run_id}):")
+            for item in results:
+                click.echo(f"  {item['artifact']:<35} : {item['status']}")
+            if all_ok:
+                click.echo("\n✓ All checked artifacts match their recorded hashes.")
+            else:
+                click.echo("\n⚠️ Artifact verification detected missing or mismatched files.")
+        sys.exit(0 if all_ok else 1)
 
-    commit_sha = run.data.tags.get("git.commit_sha")
+    # Optional git worktree mode
     if worktree:
+        mlflow_adapter = MLflowAdapter(ctx)
+        run = mlflow_adapter.resolve_run(run_id_or_prefix)
+        if not run:
+            state.fail(f"Run '{run_id_or_prefix}' not found or prefix ambiguous.", code=1)
+        commit_sha = run.data.tags.get("git.commit_sha")
         if not commit_sha:
             state.fail("Run does not contain a recorded git commit SHA; cannot create worktree.", code=1)
-        # Create temporary directory for the worktree
         import tempfile, subprocess
-        tmp_dir = tempfile.mkdtemp(prefix="ml_lineage_recover_")
-        # Use git worktree to checkout the target commit into the temp directory
+        tmp_dir = tempfile.mkdtemp(prefix="ml_lineage_worktree_")
         git_cmd = ["git", "worktree", "add", "--detach", tmp_dir, commit_sha]
         try:
             subprocess.run(git_cmd, cwd=ctx.root, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError as e:
             state.fail(f"Failed to create git worktree at {tmp_dir}: {e}", code=1)
-        # Build a new ProjectContext for the isolated worktree
-        isolated_ctx = ProjectContext.from_path(tmp_dir)
-        # Patch the recovery module to use the isolated context
-        rr.DEFAULT_CONTEXT = isolated_ctx
-        rr._dvc_adapter = DVCAdapter(isolated_ctx)
-        rr._mlflow_adapter = MLflowAdapter(isolated_ctx)
-        # Run recovery logic against the isolated context
-        rr.cmd_recover(run_id_prefix=run_id_or_prefix, dry_run=dry_run, verify_only=verify_only)
-        # Clean up the worktree after recovery
-        subprocess.run(["git", "worktree", "remove", "--force", tmp_dir], cwd=ctx.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        # Direct recovery in the current workspace using the existing module defaults
-        rr.cmd_recover(run_id_prefix=run_id_or_prefix, dry_run=dry_run, verify_only=verify_only)
+        try:
+            worktree_ctx = ProjectContext.from_path(tmp_dir)
+            svc = RecoveryService(worktree_ctx)
+            plan = svc.create_plan(run_id_or_prefix)
+            if dry_run:
+                if state.json_output:
+                    state.output(plan.to_dict())
+                else:
+                    click.echo(f"[Worktree Dry-Run] Run {run_id_or_prefix}: {len(plan.artifacts)} artifacts.")
+                sys.exit(0 if plan.can_recover else 1)
+            res = svc.execute_recovery(plan)
+            if state.json_output:
+                state.output(res.to_dict())
+            else:
+                click.echo(f"Worktree recovery complete: {res.message}")
+        finally:
+            subprocess.run(["git", "worktree", "remove", "--force", tmp_dir], cwd=ctx.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        sys.exit(0)
 
-    # No explicit output handling here; the underlying script prints its own status.
-    # If JSON output was requested, could capture and re‑emit, but current behavior mirrors existing CLI.
+    # Standard recovery engine
+    svc = RecoveryService(ctx, output_dir=output_dir)
+    try:
+        plan = svc.create_plan(run_id_or_prefix)
+    except RecoveryError as e:
+        state.fail(str(e), code=1)
+    except Exception as e:
+        state.fail(f"Unexpected error constructing recovery plan: {e}", code=1)
+
+    if dry_run:
+        if state.json_output:
+            state.output(plan.to_dict())
+            sys.exit(0 if plan.can_recover else 1)
+        else:
+            click.echo(f"\n============================================================")
+            click.echo(f"  Recovery Dry-Run Preview: {plan.run_id[:16]}...")
+            click.echo(f"============================================================")
+            click.echo(f"  Target Project   : {plan.target_project_path}")
+            click.echo(f"  Destination Root : {plan.destination_root} {'(Isolated)' if plan.is_isolated_output else '(In-Place Workspace)'}")
+            click.echo(f"  Git Commit SHA   : {plan.recorded_commit or 'unavailable'} (Local: {plan.commit_exists_locally})")
+            click.echo(f"  Git Dirty        : {plan.git_is_dirty}")
+
+            click.echo(f"\n  Proposed File Operations:")
+            for art in plan.artifacts:
+                status_icon = "✓" if art.source_verified else "✗"
+                conflict_str = " [CONFLICT: will backup]" if art.conflict else ""
+                click.echo(f"    {status_icon} {art.rel_path:<35} -> {art.action}{conflict_str}")
+                click.echo(f"        Expected MD5 : {art.expected_hash}")
+                if art.source_type:
+                    click.echo(f"        Source Type  : {art.source_type}")
+                if art.dest_exists:
+                    click.echo(f"        Current MD5  : {art.dest_hash or 'N/A'}")
+                if art.blocker_reason:
+                    click.echo(f"        Blocker      : {art.blocker_reason}")
+
+            if plan.warnings:
+                click.echo(f"\n  Warnings:")
+                for w in plan.warnings:
+                    click.echo(f"    [!] {w}")
+
+            if plan.blockers:
+                click.echo(f"\n  Blockers (Recovery will be refused):")
+                for b in plan.blockers:
+                    click.echo(f"    [XX] {b}")
+
+            click.echo(f"\n  Dry-run complete. No files were modified.")
+            if plan.can_recover:
+                click.echo(f"  Status: ALL ARTIFACTS RECOVERABLE.")
+                sys.exit(0)
+            else:
+                click.echo(f"  Status: RECOVERY BLOCKED. Resolve blockers before recovering.")
+                sys.exit(1)
+
+    # Destructive Recovery Mode
+    if not plan.can_recover:
+        if state.json_output:
+            state.output({
+                "error": "Recovery blocked by safety checks.",
+                "blockers": plan.blockers,
+                "warnings": plan.warnings,
+                "exit_code": 1,
+            })
+        else:
+            click.echo("\n[XX] Recovery refused due to safety blockers:", err=True)
+            for b in plan.blockers:
+                click.echo(f"  - {b}", err=True)
+            click.echo("Use --dry-run to inspect details or --output to recover to an isolated directory.", err=True)
+        sys.exit(1)
+
+    # Explicit confirmation check
+    is_interactive = sys.stdin.isatty()
+    if is_interactive:
+        click.echo(f"\nRecovery Plan for Run {plan.run_id[:8]}:")
+        click.echo(f"  Target Destination : {plan.destination_root}")
+        for art in plan.artifacts:
+            click.echo(f"  - {art.rel_path} [{art.action}] (Hash: {art.expected_hash[:8]}...)")
+        if not yes:
+            if not click.confirm("\nProceed with recovery? This will modify destination files.", default=False):
+                state.fail("Recovery cancelled by user.", code=1)
+    else:
+        # Non-interactive safety check
+        if not yes:
+            state.fail("Non-interactive execution requires explicit confirmation flag (--yes).", code=1)
+
+    # Execute recovery transaction
+    try:
+        result = svc.execute_recovery(plan)
+        if state.json_output:
+            state.output(result.to_dict())
+        else:
+            click.echo(f"\n✓ Recovery successful for run {plan.run_id[:8]}.")
+            click.echo(f"  Destination root   : {result.destination_root}")
+            click.echo(f"  Operations applied : {len(result.operations_applied)}")
+            if result.backups_created:
+                click.echo(f"  Backups created    : {len(result.backups_created)}")
+            if result.manifest_path:
+                click.echo(f"  Audit manifest     : {result.manifest_path}")
+        sys.exit(0)
+    except RecoveryExecutionError as ree:
+        if state.json_output:
+            state.output({
+                "error": str(ree),
+                "rollback_success": ree.rollback_success,
+                "rollback_errors": ree.rollback_errors,
+                "exit_code": 1,
+            })
+        else:
+            click.echo(f"\n[XX] Execution Error: {ree}", err=True)
+            if ree.rollback_success:
+                click.echo("  ✓ Transactional rollback succeeded. Destination files restored to original state.", err=True)
+            else:
+                click.echo(f"  [XX] Rollback encountered errors: {ree.rollback_errors}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        state.fail(f"Recovery failed: {e}", code=1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subcommand: verify (Run artifact hash verification)
+# ─────────────────────────────────────────────────────────────────────────────
+@main.command(name="verify", help="Verify workspace and cache artifact integrity for a recorded run.")
+@click.argument("run_id_or_prefix", metavar="RUN_ID")
+@common_options
+@pass_state
+def cmd_verify(
+    state: CliState,
+    run_id_or_prefix: str,
+    path: str | None,
+    project: str | None,
+    json_output: bool,
+    verbose: bool,
+):
+    """Verify artifact hashes recorded for a run against current workspace and DVC cache."""
+    state.update(path=path, project=project, json_output=json_output, verbose=verbose)
+    ctx = state.get_project_context()
+
+    mlflow_adapter = MLflowAdapter(ctx)
+    run = mlflow_adapter.resolve_run(run_id_or_prefix)
+    if not run:
+        state.fail(f"Run '{run_id_or_prefix}' not found or prefix ambiguous.", code=1)
+
+    verification_results = verify_run_artifacts(ctx, run)
+    tested_artifacts = [
+        item for item in verification_results
+        if item.get("expected_hash") not in (None, "", "unavailable")
+    ]
+    if not tested_artifacts:
+        all_ok = False
+    else:
+        all_ok = all(
+            item["status"].startswith("✅") or item.get("workspace_hash") == item.get("expected_hash")
+            for item in tested_artifacts
+        )
+
+    if state.json_output:
+        state.output({
+            "run_id": run.info.run_id,
+            "all_verified": all_ok,
+            "artifacts": verification_results,
+        })
+    else:
+        click.echo(f"\nArtifact Verification for Run {run.info.run_id[:8]} ({run.info.run_id}):")
+        click.echo(f"{'Artifact':<36} {'Status':<30} {'Expected Hash':<34} Current Hash")
+        click.echo("-" * 120)
+        for item in verification_results:
+            click.echo(
+                f"{item['artifact']:<36} {item['status']:<30} "
+                f"{item['expected_hash']:<34} {item.get('workspace_hash') or 'N/A'}"
+            )
+        if all_ok:
+            click.echo("\n✓ All checked artifacts match their recorded hashes.")
+        else:
+            click.echo("\n⚠️ Artifact verification detected missing or mismatched files.")
+
+    sys.exit(0 if all_ok else 1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

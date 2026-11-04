@@ -3,6 +3,12 @@
 __pycache__/
 *.pyc
 
+# Distribution / packaging build artifacts
+*.egg-info/
+dist/
+build/
+*.egg
+
 # Data and Model binaries tracked by DVC (do not commit raw files to Git)
 /data/
 /models/

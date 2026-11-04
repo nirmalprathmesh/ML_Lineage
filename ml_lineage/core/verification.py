@@ -134,14 +134,24 @@ def verify_run_artifacts(
 
     Compatible with app.py verify_run_artifacts interface.
     """
+    tags = run.data.tags
     if tag_map is None:
-        tag_map = WINE_DVC_TAG_MAP
+        wine_present = any(k in tags for k in WINE_DVC_TAG_MAP)
+        if wine_present:
+            tag_map = dict(WINE_DVC_TAG_MAP)
+        else:
+            tag_map = {}
+            for k in tags:
+                for prefix in ("dvc.hash.", "artifact.hash.", "hash."):
+                    if k.startswith(prefix):
+                        tag_map[k] = k[len(prefix):]
+            if not tag_map:
+                tag_map = dict(WINE_DVC_TAG_MAP)
 
     from ml_lineage.adapters.dvc import DVCAdapter
     if dvc_adapter is None:
         dvc_adapter = DVCAdapter(context)
 
-    tags = run.data.tags
     lock_hashes = dvc_adapter.load_lock_hashes()
     results = []
 
