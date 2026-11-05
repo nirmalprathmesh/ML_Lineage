@@ -32,16 +32,13 @@ if TYPE_CHECKING:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Exceptions
+# Exceptions & Shared Path Traversal Validator
 # ─────────────────────────────────────────────────────────────────────────────
-class RecoveryError(Exception):
-    """Base exception for recovery operations."""
-    pass
-
-
-class PathTraversalError(RecoveryError):
-    """Raised when an artifact destination attempts path traversal."""
-    pass
+from ml_lineage.core.verification import (
+    PathTraversalError,
+    RecoveryError,
+    validate_destination_path,
+)
 
 
 class BackupError(RecoveryError):
@@ -58,50 +55,11 @@ class RecoveryExecutionError(RecoveryError):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Path Traversal and Normalization
+# Path Normalization
 # ─────────────────────────────────────────────────────────────────────────────
 def normalize_rel_path(path_str: str) -> str:
     """Normalize a relative path string using forward slashes."""
     return os.path.normpath(path_str).replace("\\", "/").lstrip("/")
-
-
-def validate_destination_path(root: Path, rel_path: str) -> Path:
-    """Validate that rel_path resolves strictly within root without path traversal.
-
-    Rejects absolute paths, Windows drive anchors, and directory traversal sequences ('..').
-
-    Args:
-        root: Target directory root.
-        rel_path: Relative destination path.
-
-    Returns:
-        Resolved absolute Path safely contained inside root.
-
-    Raises:
-        PathTraversalError: If the path attempts to escape the root directory.
-    """
-    raw = rel_path.strip()
-    if not raw:
-        raise PathTraversalError("Empty artifact path is invalid.")
-
-    # Disallow absolute paths or Windows drive letters
-    if os.path.isabs(raw) or raw.startswith("/") or raw.startswith("\\") or (len(raw) > 1 and raw[1] == ":"):
-        raise PathTraversalError(f"Absolute or anchored path is prohibited: '{raw}'")
-
-    # Reject '..' components
-    parts = Path(raw).parts
-    if ".." in parts:
-        raise PathTraversalError(f"Directory traversal component '..' detected in: '{raw}'")
-
-    resolved_root = root.resolve()
-    resolved_target = (resolved_root / raw).resolve()
-
-    try:
-        resolved_target.relative_to(resolved_root)
-    except ValueError:
-        raise PathTraversalError(f"Path traversal detected: '{raw}' resolves outside '{resolved_root}'")
-
-    return resolved_target
 
 
 # ─────────────────────────────────────────────────────────────────────────────

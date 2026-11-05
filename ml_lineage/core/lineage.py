@@ -44,6 +44,7 @@ def find_recorded_artifact_hash(
     artifact_path: str,
     run_tags: dict[str, str],
     lineage_manifest: dict[str, Any] | None = None,
+    is_wine_project: bool = False,
 ) -> tuple[str | None, str | None]:
     """Search MLflow run tags and lineage manifest for a recorded artifact hash.
 
@@ -54,11 +55,12 @@ def find_recorded_artifact_hash(
     leaf_name = os.path.basename(norm_path)
     leaf_stem = os.path.splitext(leaf_name)[0]
 
-    # 1. Check Wine demo tag mapping (backward compatibility)
-    for tag_key, mapped_path in WINE_DVC_TAG_MAP.items():
-        if _normalize_path(mapped_path) == norm_path:
-            if tag_key in run_tags:
-                return run_tags[tag_key], f"tag:{tag_key}"
+    # 1. Check Wine demo tag mapping strictly for the default Wine project
+    if is_wine_project:
+        for tag_key, mapped_path in WINE_DVC_TAG_MAP.items():
+            if _normalize_path(mapped_path) == norm_path:
+                if tag_key in run_tags:
+                    return run_tags[tag_key], f"tag:{tag_key}"
 
     # 2. Check direct path tag or standard conventions (dvc.hash.<path>, hash.<path>)
     candidate_keys = [
@@ -264,6 +266,8 @@ def trace_run_lineage(context: ProjectContext, run_id_or_prefix: str) -> RunLine
     dag = parse_dvc_pipeline(context)
     current_lock_hashes = dvc_adapter.load_lock_hashes()
 
+    is_wine = (context.root / "data" / "raw" / "wine_dataset.csv").is_file()
+
     # 4. Process Stages and Artifacts
     stage_reports: list[StageLineageReport] = []
     all_artifact_checks: list[dict[str, Any]] = []
@@ -280,7 +284,7 @@ def trace_run_lineage(context: ProjectContext, run_id_or_prefix: str) -> RunLine
         stage_has_recorded_evidence = False
 
         for out in stage.outs:
-            rec_hash, rec_src = find_recorded_artifact_hash(out.path, tags, lineage_manifest)
+            rec_hash, rec_src = find_recorded_artifact_hash(out.path, tags, lineage_manifest, is_wine_project=is_wine)
             is_metric = out.is_metric or out.path.endswith(".json")
 
             # Check provenance against workspace and DVC storage
@@ -350,10 +354,10 @@ def trace_run_lineage(context: ProjectContext, run_id_or_prefix: str) -> RunLine
         generic_outs: list[dict[str, Any]] = []
         for tag_k, tag_v in tags.items():
             if tag_k.startswith(("dvc.hash.", "artifact.hash.", "hash.")):
-                mapped_path = WINE_DVC_TAG_MAP.get(
-                    tag_k,
-                    tag_k.replace("dvc.hash.", "").replace("artifact.hash.", "").replace("hash.", "")
-                )
+                if is_wine and tag_k in WINE_DVC_TAG_MAP:
+                    mapped_path = WINE_DVC_TAG_MAP[tag_k]
+                else:
+                    mapped_path = tag_k.replace("dvc.hash.", "").replace("artifact.hash.", "").replace("hash.", "")
                 prov = check_artifact_provenance(
                     context,
                     mapped_path,
@@ -365,6 +369,28 @@ def trace_run_lineage(context: ProjectContext, run_id_or_prefix: str) -> RunLine
                 prov["evidence_source"] = f"tag:{tag_k}"
                 generic_outs.append(prov)
                 all_artifact_checks.append(prov)
+            else:
+                lower_k = tag_k.lower()
+                if (
+                    ("hash" in lower_k or "md5" in lower_k or "checksum" in lower_k or lower_k.startswith(("artifact.", "dvc.")))
+                    and not lower_k.startswith(("mlflow.", "git.", "env.", "dvc.repo", "dvc.version"))
+                ):
+                    # Unknown artifact format: do not claim exact lineage
+                    generic_outs.append({
+                        "path": tag_k,
+                        "expected_hash": tag_v,
+                        "lock_hash": "unavailable",
+                        "workspace_exists": False,
+                        "workspace_hash": None,
+                        "workspace_status": "UNAVAILABLE",
+                        "lock_status": "UNKNOWN",
+                        "dvc_cache_available": False,
+                        "dvc_remote_available": False,
+                        "status": "UNVERIFIABLE_UNSUPPORTED_TAG_FORMAT",
+                        "evidence_level": EvidenceLevel.UNAVAILABLE.value,
+                        "evidence_source": f"unknown_tag:{tag_k}",
+                        "role": "unsupported",
+                    })
 
         if generic_outs:
             stage_rep = StageLineageReport(

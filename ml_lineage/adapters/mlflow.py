@@ -132,8 +132,8 @@ class MLflowAdapter:
             for tag_key in tag_map:
                 dvc_hashes[tag_key] = tags.get(tag_key, "unavailable")
         else:
-            has_wine_tags = any(k in tags for k in WINE_DVC_TAG_MAP)
-            if has_wine_tags:
+            is_wine = (self.context.root / "data" / "raw" / "wine_dataset.csv").is_file()
+            if is_wine and any(k in tags for k in WINE_DVC_TAG_MAP):
                 for tag_key in WINE_DVC_TAG_MAP:
                     dvc_hashes[tag_key] = tags.get(tag_key, "unavailable")
 
@@ -141,7 +141,7 @@ class MLflowAdapter:
                 if k.startswith(("dvc.hash.", "artifact.hash.", "hash.")):
                     dvc_hashes[k] = v
 
-            if not dvc_hashes:
+            if not dvc_hashes and is_wine:
                 for tag_key in WINE_DVC_TAG_MAP:
                     dvc_hashes[tag_key] = tags.get(tag_key, "unavailable")
 
@@ -238,8 +238,8 @@ class MLflowAdapter:
         det_b = self.get_run_details(run_b, tag_map=tag_map)
 
         if tag_map is None:
-            has_wine_tags = any(k in det_a["dvc_hashes"] for k in WINE_DVC_TAG_MAP) or any(k in det_b["dvc_hashes"] for k in WINE_DVC_TAG_MAP)
-            if has_wine_tags:
+            is_wine = (self.context.root / "data" / "raw" / "wine_dataset.csv").is_file()
+            if is_wine and (any(k in det_a["dvc_hashes"] for k in WINE_DVC_TAG_MAP) or any(k in det_b["dvc_hashes"] for k in WINE_DVC_TAG_MAP)):
                 tag_map = WINE_DVC_TAG_MAP
             else:
                 all_keys = sorted(set(det_a["dvc_hashes"].keys()) | set(det_b["dvc_hashes"].keys()))

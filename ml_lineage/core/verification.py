@@ -8,6 +8,7 @@ dvc.lock state, local DVC cache, and configured remote storage.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,64 @@ from ml_lineage.wine import WINE_DVC_TAG_MAP
 if TYPE_CHECKING:
     from ml_lineage.core.context import ProjectContext
     from ml_lineage.adapters.dvc import DVCAdapter
+
+__all__ = [
+    "check_artifact_provenance",
+    "verify_run_artifacts",
+    "RecoveryError",
+    "PathTraversalError",
+    "validate_destination_path",
+]
+
+
+class RecoveryError(Exception):
+    """Base exception for recovery and artifact verification operations."""
+    pass
+
+
+class PathTraversalError(RecoveryError):
+    """Raised when an artifact destination attempts path traversal or escapes project containment."""
+    pass
+
+
+def validate_destination_path(root: Path, rel_path: str) -> Path:
+    """Validate that rel_path resolves strictly within root without path traversal.
+
+    Rejects absolute paths, Windows drive anchors, and directory traversal sequences ('..').
+
+    Args:
+        root: Target directory root.
+        rel_path: Relative destination path.
+
+    Returns:
+        Resolved absolute Path safely contained inside root.
+
+    Raises:
+        PathTraversalError: If the path attempts to escape the root directory.
+    """
+    raw = rel_path.strip()
+    if not raw:
+        raise PathTraversalError("Empty artifact path is invalid.")
+
+    # Disallow absolute paths or Windows drive letters
+    if os.path.isabs(raw) or raw.startswith("/") or raw.startswith("\\") or (len(raw) > 1 and raw[1] == ":"):
+        raise PathTraversalError(f"Absolute or anchored path is prohibited: '{raw}'")
+
+    # Reject '..' components across all platforms
+    norm = raw.replace("\\", "/")
+    parts = Path(norm).parts
+    if ".." in parts:
+        raise PathTraversalError(f"Directory traversal component '..' detected in: '{raw}'")
+
+    resolved_root = root.resolve()
+    resolved_target = (resolved_root / raw).resolve()
+
+    try:
+        resolved_target.relative_to(resolved_root)
+    except ValueError:
+        raise PathTraversalError(f"Path traversal detected: '{raw}' resolves outside '{resolved_root}'")
+
+    return resolved_target
 
 
 def check_artifact_provenance(
@@ -39,8 +98,11 @@ def check_artifact_provenance(
 
     Returns:
         Structured artifact status dictionary.
+
+    Raises:
+        PathTraversalError: If rel_path escapes the project root or attempts traversal.
     """
-    abs_path = context.resolve_path(rel_path)
+    abs_path = validate_destination_path(context.root, str(rel_path))
     workspace_exists = abs_path.is_file()
 
     result: dict[str, Any] = {
@@ -133,20 +195,32 @@ def verify_run_artifacts(
     """Verify all mapped artifact hashes for a run against the workspace and DVC cache.
 
     Compatible with app.py verify_run_artifacts interface.
+    Enforces strict project scoping: Wine-specific tag mappings apply only to
+    the default Wine project; external projects use dynamic tag discovery or custom maps.
     """
-    tags = run.data.tags
+    tags = getattr(getattr(run, "data", None), "tags", {}) or {}
+    unknown_format_tags: list[str] = []
+
     if tag_map is None:
-        wine_present = any(k in tags for k in WINE_DVC_TAG_MAP)
-        if wine_present:
+        is_wine_project = (context.root / "data" / "raw" / "wine_dataset.csv").is_file() and any(k in tags for k in WINE_DVC_TAG_MAP)
+        if is_wine_project:
             tag_map = dict(WINE_DVC_TAG_MAP)
         else:
             tag_map = {}
             for k in tags:
+                matched_prefix = False
                 for prefix in ("dvc.hash.", "artifact.hash.", "hash."):
                     if k.startswith(prefix):
                         tag_map[k] = k[len(prefix):]
-            if not tag_map:
-                tag_map = dict(WINE_DVC_TAG_MAP)
+                        matched_prefix = True
+                        break
+                if not matched_prefix:
+                    lower_k = k.lower()
+                    if (
+                        ("hash" in lower_k or "md5" in lower_k or "checksum" in lower_k or lower_k.startswith(("artifact.", "dvc.")))
+                        and not lower_k.startswith(("mlflow.", "git.", "env.", "dvc.repo", "dvc.version"))
+                    ):
+                        unknown_format_tags.append(k)
 
     from ml_lineage.adapters.dvc import DVCAdapter
     if dvc_adapter is None:
@@ -157,7 +231,7 @@ def verify_run_artifacts(
 
     for tag_key, rel_path in tag_map.items():
         expected_hash = tags.get(tag_key, "")
-        abs_path = context.resolve_path(rel_path)
+        abs_path = validate_destination_path(context.root, str(rel_path))
 
         entry = {
             "artifact": rel_path,
@@ -190,5 +264,16 @@ def verify_run_artifacts(
                 entry["status"] += " (recoverable from cache)"
 
         results.append(entry)
+
+    # Classify unknown artifact tag formats as unsupported / unverifiable
+    for unk_tag in unknown_format_tags:
+        results.append({
+            "artifact": unk_tag,
+            "expected_hash": tags.get(unk_tag, "unavailable"),
+            "workspace_exists": False,
+            "workspace_hash": None,
+            "status": "⚠️ UNVERIFIABLE (unsupported artifact tag format)",
+            "lock_hash": "unavailable",
+        })
 
     return results

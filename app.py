@@ -18,7 +18,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -60,6 +63,7 @@ DVC_TAG_MAP = {
 
 from ml_lineage.core.context import ProjectContext
 from ml_lineage.core.hashing import compute_file_md5 as _core_compute_file_md5
+from ml_lineage.core.registry import ProjectRegistry
 from ml_lineage.core.verification import verify_run_artifacts as _core_verify_run_artifacts
 from ml_lineage.adapters.git import GitAdapter
 from ml_lineage.adapters.dvc import DVCAdapter
@@ -72,67 +76,35 @@ _mlflow_adapter = MLflowAdapter(DEFAULT_CONTEXT)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MLflow / Config Helpers (Delegated to ml_lineage)
+# Session State Management & Isolation
 # ─────────────────────────────────────────────────────────────────────────────
-def get_tracking_uri() -> str:
-    """Retrieve absolute tracking URI from params.yaml or fallback."""
-    return DEFAULT_CONTEXT.tracking_uri
+class SessionStore(dict):
+    """Dict subclass allowing attribute-style access like Streamlit's session_state."""
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(f"'SessionStore' object has no attribute '{name}'")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self[name] = value
+
+    def __delattr__(self, name: str) -> None:
+        try:
+            del self[name]
+        except KeyError:
+            raise AttributeError(f"'SessionStore' object has no attribute '{name}'")
 
 
-def get_mlflow_client() -> MlflowClient:
-    """Create an MLflow client configured with the project's tracking URI."""
-    return _mlflow_adapter.get_client()
+# Thread-local storage for simulated / isolated test sessions
+_test_session_local = threading.local()
 
-
-def compute_file_md5(filepath: str) -> str:
-    """Calculate MD5 hash of a local file."""
-    return _core_compute_file_md5(filepath)
-
-
-def load_dvc_lock_hashes() -> dict:
-    """Parse dvc.lock to extract current stage output MD5 hashes."""
-    return _dvc_adapter.load_lock_hashes()
-
-
-def get_python_executable() -> str:
-    """Return path to verified project venv Python or sys.executable."""
-    return DEFAULT_CONTEXT.python_executable
-
-
-# Test-only isolated confirmation fixture hook (ONLY active when explicitly enabled by unit tests/harnesses)
-_test_confirmation_override = None
-
-
-class IsolatedTestSession:
-    """Explicitly isolated test fixture simulating a Streamlit session outside Streamlit runtime."""
-
-    def __init__(self, initial_state: dict = None):
-        self.store = initial_state.copy() if initial_state else {}
-
-    def __enter__(self):
-        global _test_confirmation_override
-        self._prev = _test_confirmation_override
-        _test_confirmation_override = self.store
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        global _test_confirmation_override
-        _test_confirmation_override = self._prev
-
-
-def enable_test_session_override(store: dict = None) -> dict:
-    """Enable isolated test session store for testing outside Streamlit."""
-    global _test_confirmation_override
-    if store is None:
-        store = {}
-    _test_confirmation_override = store
-    return store
-
-
-def disable_test_session_override() -> None:
-    """Disable test session store."""
-    global _test_confirmation_override
-    _test_confirmation_override = None
+# Standalone session store for non-Streamlit execution (CLI, scripts, standalone tests)
+_standalone_session_store = SessionStore({
+    "selected_project_alias": "(default)",
+    "active_context": DEFAULT_CONTEXT,
+})
 
 
 def is_running_in_streamlit() -> bool:
@@ -144,14 +116,246 @@ def is_running_in_streamlit() -> bool:
         return False
 
 
+def _get_session():
+    """Retrieve the active session store for the current execution thread.
+
+    Priority:
+    1. Explicit thread-local test session override (IsolatedTestSession / enable_test_session_override).
+    2. Active Streamlit runtime session_state (st.session_state).
+    3. Standalone fallback store for non-Streamlit scripts or harness execution.
+    """
+    override = getattr(_test_session_local, "current", None)
+    if override is not None:
+        return override
+
+    if is_running_in_streamlit():
+        return st.session_state
+
+    return _standalone_session_store
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-Project Context Resolution Helpers (Session-Scoped)
+# ─────────────────────────────────────────────────────────────────────────────
+def get_project_registry() -> ProjectRegistry:
+    """Return ProjectRegistry instance."""
+    return ProjectRegistry()
+
+
+def get_registered_projects() -> dict[str, dict]:
+    """Retrieve mapping of alias -> project metadata from the global registry."""
+    try:
+        return get_project_registry().list_projects()
+    except Exception:
+        return {}
+
+
+def get_active_project_alias() -> str:
+    """Return current active project alias for the current session or '(default)'."""
+    sess = _get_session()
+    if sess is not None:
+        return sess.get("selected_project_alias", "(default)")
+    return "(default)"
+
+
+def get_active_context() -> ProjectContext:
+    """Return the currently active ProjectContext for the current session.
+
+    Derived strictly from the current session's selected alias / context.
+    Preserves DEFAULT_CONTEXT when no project is selected or '(default)' is active.
+    """
+    sess = _get_session()
+    if sess is not None:
+        ctx = sess.get("active_context")
+        if ctx is not None:
+            return ctx
+    return DEFAULT_CONTEXT
+
+
+def get_active_git_adapter() -> GitAdapter:
+    """Return GitAdapter scoped to the current session's active project context."""
+    sess = _get_session()
+    ctx = get_active_context()
+    if sess is not None:
+        adapter = sess.get("active_git_adapter")
+        adapter_root = sess.get("_active_adapter_root")
+        if adapter is not None and adapter_root == str(ctx.root):
+            return adapter
+        adapter = GitAdapter(ctx)
+        sess["active_git_adapter"] = adapter
+        sess["_active_adapter_root"] = str(ctx.root)
+        return adapter
+    return GitAdapter(ctx)
+
+
+def get_active_dvc_adapter() -> DVCAdapter:
+    """Return DVCAdapter scoped to the current session's active project context."""
+    sess = _get_session()
+    ctx = get_active_context()
+    if sess is not None:
+        adapter = sess.get("active_dvc_adapter")
+        adapter_root = sess.get("_active_adapter_root")
+        if adapter is not None and adapter_root == str(ctx.root):
+            return adapter
+        adapter = DVCAdapter(ctx)
+        sess["active_dvc_adapter"] = adapter
+        sess["_active_adapter_root"] = str(ctx.root)
+        return adapter
+    return DVCAdapter(ctx)
+
+
+def get_active_mlflow_adapter() -> MLflowAdapter:
+    """Return MLflowAdapter scoped to the current session's active project context."""
+    sess = _get_session()
+    ctx = get_active_context()
+    if sess is not None:
+        adapter = sess.get("active_mlflow_adapter")
+        adapter_root = sess.get("_active_adapter_root")
+        if adapter is not None and adapter_root == str(ctx.root):
+            return adapter
+        adapter = MLflowAdapter(ctx)
+        sess["active_mlflow_adapter"] = adapter
+        sess["_active_adapter_root"] = str(ctx.root)
+        return adapter
+    return MLflowAdapter(ctx)
+
+
+def get_active_tag_map() -> dict[str, str] | None:
+    """Return tag map for active project. None enables dynamic tag discovery for non-Wine projects."""
+    ctx = get_active_context()
+    if str(ctx.root) == str(DEFAULT_CONTEXT.root):
+        return DVC_TAG_MAP
+    return None
+
+
+def set_active_project(alias: str | None) -> tuple[bool, str]:
+    """Switch the active project context for the current session.
+
+    Args:
+        alias: Registered project alias, or None / "(default)" for default workspace.
+
+    Returns:
+        (success: bool, message: str)
+    """
+    sess = _get_session()
+
+    clean = str(alias).strip().lower() if alias else ""
+    if not clean or clean in ("(default)", "default", "none"):
+        clear_confirmation_state()
+        if sess is not None:
+            sess["selected_project_alias"] = "(default)"
+            sess["active_context"] = DEFAULT_CONTEXT
+            sess["active_git_adapter"] = GitAdapter(DEFAULT_CONTEXT)
+            sess["active_dvc_adapter"] = DVCAdapter(DEFAULT_CONTEXT)
+            sess["active_mlflow_adapter"] = MLflowAdapter(DEFAULT_CONTEXT)
+            sess["_active_adapter_root"] = str(DEFAULT_CONTEXT.root)
+        return True, "Switched to default project."
+
+    registry = get_project_registry()
+    entry = registry.get(clean)
+    if not entry:
+        return False, f"Project alias '{clean}' is not registered."
+
+    target_path = Path(entry.get("path", ""))
+    if not target_path.is_dir():
+        return False, f"Target directory for alias '{clean}' does not exist or is inaccessible: {target_path}"
+
+    try:
+        new_ctx = ProjectContext.from_path(target_path)
+    except Exception as e:
+        return False, f"Failed to initialize project context for '{clean}': {e}"
+
+    # Invalidate pending recovery confirmation when switching projects
+    clear_confirmation_state()
+
+    if sess is not None:
+        sess["selected_project_alias"] = clean
+        sess["active_context"] = new_ctx
+        sess["active_git_adapter"] = GitAdapter(new_ctx)
+        sess["active_dvc_adapter"] = DVCAdapter(new_ctx)
+        sess["active_mlflow_adapter"] = MLflowAdapter(new_ctx)
+        sess["_active_adapter_root"] = str(new_ctx.root)
+
+    return True, f"Switched to project '{clean}'."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MLflow / Config Helpers (Delegated to active project context)
+# ─────────────────────────────────────────────────────────────────────────────
+def get_tracking_uri() -> str:
+    """Retrieve absolute tracking URI from active project context."""
+    return get_active_context().tracking_uri
+
+
+def get_mlflow_client() -> MlflowClient:
+    """Create an MLflow client configured with the active project's tracking URI."""
+    return get_active_mlflow_adapter().get_client()
+
+
+def compute_file_md5(filepath: str) -> str:
+    """Calculate MD5 hash of a local file."""
+    return _core_compute_file_md5(filepath)
+
+
+def load_dvc_lock_hashes() -> dict:
+    """Parse dvc.lock to extract current stage output MD5 hashes for active project."""
+    return get_active_dvc_adapter().load_lock_hashes()
+
+
+def get_python_executable() -> str:
+    """Return path to verified active project venv Python or sys.executable."""
+    return get_active_context().python_executable
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Isolated Test Fixtures & Recovery Confirmation State
+# ─────────────────────────────────────────────────────────────────────────────
+class IsolatedTestSession:
+    """Explicitly isolated test fixture simulating a Streamlit session outside Streamlit runtime."""
+
+    def __init__(self, initial_state: dict = None):
+        self.store = SessionStore({
+            "selected_project_alias": "(default)",
+            "active_context": DEFAULT_CONTEXT,
+        })
+        if initial_state:
+            self.store.update(initial_state)
+
+    def __enter__(self):
+        self._prev = getattr(_test_session_local, "current", None)
+        _test_session_local.current = self.store
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        _test_session_local.current = self._prev
+
+
+def enable_test_session_override(store: dict = None) -> SessionStore:
+    """Enable isolated test session store for testing outside Streamlit."""
+    s = SessionStore({
+        "selected_project_alias": "(default)",
+        "active_context": DEFAULT_CONTEXT,
+    })
+    if store is not None:
+        s.update(store)
+    _test_session_local.current = s
+    return s
+
+
+def disable_test_session_override() -> None:
+    """Disable test session store."""
+    _test_session_local.current = None
+
+
 def get_confirmation_state() -> dict | None:
+    """Retrieve pending recovery confirmation state for the active session.
+
+    Strictly isolated to st.session_state in Streamlit runtime or an active
+    IsolatedTestSession outside Streamlit. Outside these contexts, returns None.
     """
-    Retrieve pending recovery confirmation state.
-    Strictly isolated to st.session_state when running in Streamlit.
-    Outside Streamlit, only accessible if an isolated test session is explicitly active.
-    """
-    if _test_confirmation_override is not None:
-        return _test_confirmation_override.get("pending_recovery")
+    override = getattr(_test_session_local, "current", None)
+    if override is not None:
+        return override.get("pending_recovery")
 
     if is_running_in_streamlit():
         try:
@@ -163,15 +367,17 @@ def get_confirmation_state() -> dict | None:
 
 
 def set_confirmation_state(state: dict | None) -> None:
+    """Set or clear pending recovery confirmation state in the active session.
+
+    Strictly isolated to st.session_state in Streamlit runtime or an active
+    IsolatedTestSession outside Streamlit. Outside these contexts, does not leak.
     """
-    Set or clear pending recovery confirmation state.
-    Strictly isolated to st.session_state in Streamlit.
-    """
-    if _test_confirmation_override is not None:
+    override = getattr(_test_session_local, "current", None)
+    if override is not None:
         if state is None:
-            _test_confirmation_override.pop("pending_recovery", None)
+            override.pop("pending_recovery", None)
         else:
-            _test_confirmation_override["pending_recovery"] = state
+            override["pending_recovery"] = state
         return
 
     if is_running_in_streamlit():
@@ -186,14 +392,14 @@ def set_confirmation_state(state: dict | None) -> None:
 
 
 def clear_confirmation_state() -> None:
-    """Clear any pending recovery confirmation state in the current session."""
+    """Clear any pending recovery confirmation state in the active session."""
     set_confirmation_state(None)
 
 
 def run_recovery_subprocess(run_id: str, extra_args: list = None, timeout: int = 30) -> dict:
     """
-    Safely invoke scripts/recover_run.py for a validated run_id.
-    Never uses shell=True. Validates script existence and captures stdout/stderr.
+    Safely invoke recovery for a validated run_id in the active project context.
+    Never uses shell=True. Validates script/CLI existence and captures stdout/stderr.
     Returns:
         {
             "success": bool,
@@ -217,30 +423,36 @@ def run_recovery_subprocess(run_id: str, extra_args: list = None, timeout: int =
             "error": "InvalidRunIDFormat",
         }
 
-    script_path = os.path.join(PROJECT_ROOT, "scripts", "recover_run.py")
-    if not os.path.exists(script_path):
-        return {
-            "success": False,
-            "exit_code": -1,
-            "stdout": "",
-            "stderr": f"Recovery script not found at: {script_path}",
-            "error": "ScriptNotFound",
-        }
-
+    active_ctx = get_active_context()
     python_exe = get_python_executable()
-    cmd = [python_exe, script_path, clean_id] + list(extra_args)
 
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["MLFLOW_DISABLE_AGENT_HINT"] = "1"
     env["MLFLOW_ALLOW_FILE_STORE"] = "true"
 
+    if str(active_ctx.root) == str(DEFAULT_CONTEXT.root):
+        script_path = os.path.join(PROJECT_ROOT, "scripts", "recover_run.py")
+        if not os.path.exists(script_path):
+            return {
+                "success": False,
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": f"Recovery script not found at: {script_path}",
+                "error": "ScriptNotFound",
+            }
+        cmd = [python_exe, script_path, clean_id] + list(extra_args)
+        cwd_dir = PROJECT_ROOT
+    else:
+        cmd = [python_exe, "-m", "ml_lineage.cli", "--path", str(active_ctx.root), "recover", clean_id] + list(extra_args)
+        cwd_dir = str(active_ctx.root)
+
     try:
         proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            cwd=PROJECT_ROOT,
+            cwd=cwd_dir,
             timeout=timeout,
             encoding="utf-8",
             errors="replace",
@@ -275,80 +487,94 @@ def run_recovery_subprocess(run_id: str, extra_args: list = None, timeout: int =
 # Data Fetching Functions
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_all_runs() -> list:
-    """Fetch all MLflow runs from the project's tracking store."""
-    return _mlflow_adapter.fetch_all_runs()
+    """Fetch all MLflow runs from the active project's tracking store."""
+    return get_active_mlflow_adapter().fetch_all_runs()
 
 
 def resolve_run(run_id_prefix: str):
-    """Find a run by full ID or prefix. Returns the run object or None."""
-    return _mlflow_adapter.resolve_run(run_id_prefix)
+    """Find a run by full ID or prefix in the active project. Returns the run object or None."""
+    return get_active_mlflow_adapter().resolve_run(run_id_prefix)
 
 
 def get_run_details(run) -> dict:
-    """Extract a structured dict of run information."""
-    return _mlflow_adapter.get_run_details(run, tag_map=DVC_TAG_MAP)
+    """Extract a structured dict of run information for the active project."""
+    return get_active_mlflow_adapter().get_run_details(run, tag_map=get_active_tag_map())
 
 
 def get_runs_dataframe(runs=None) -> pd.DataFrame:
     """Convert MLflow runs into a clean, typed pandas DataFrame for dashboard views."""
-    return _mlflow_adapter.get_runs_dataframe(runs=runs)
+    return get_active_mlflow_adapter().get_runs_dataframe(runs=runs)
 
 
 def fetch_lineage_report_data(run_id_prefix: str) -> dict | None:
-    """Execute lineage_report.py with JSON output and return structured dict."""
+    """Retrieve lineage report data for the active project context."""
+    active_ctx = get_active_context()
     run = resolve_run(run_id_prefix)
     if not run:
         return None
 
-    python_exe = get_python_executable()
-    script_path = os.path.join(PROJECT_ROOT, "scripts", "lineage_report.py")
-    if not os.path.exists(script_path):
-        return None
-
+    # First attempt the generic core lineage engine
     try:
-        res = subprocess.run(
-            [python_exe, script_path, run.info.run_id, "--format", "json"],
-            capture_output=True,
-            text=True,
-            cwd=PROJECT_ROOT,
-            timeout=30,
-            encoding="utf-8",
-            errors="replace",
-        )
-        if res.returncode in (0, 2):
-            raw = res.stdout.strip()
-            idx = raw.find("{")
-            if idx != -1:
-                return json.loads(raw[idx:])
-            return json.loads(raw)
+        from ml_lineage.core.lineage import trace_run_lineage
+        rep = trace_run_lineage(active_ctx, run.info.run_id)
+        if rep:
+            return rep.to_dict()
     except Exception:
         pass
+
+    # Fallback to scripts/lineage_report.py
+    python_exe = get_python_executable()
+    script_path = os.path.join(PROJECT_ROOT, "scripts", "lineage_report.py")
+    if os.path.exists(script_path):
+        try:
+            res = subprocess.run(
+                [python_exe, script_path, run.info.run_id, "--format", "json"],
+                capture_output=True,
+                text=True,
+                cwd=str(active_ctx.root),
+                timeout=30,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if res.returncode in (0, 2):
+                raw = res.stdout.strip()
+                idx = raw.find("{")
+                if idx != -1:
+                    return json.loads(raw[idx:])
+                return json.loads(raw)
+        except Exception:
+            pass
     return None
 
 
 def get_run_comparison_matrix(run_id_a: str, run_id_b: str) -> dict:
-    """Generate structured side-by-side comparison data for two runs."""
-    return _mlflow_adapter.get_run_comparison_matrix(run_id_a, run_id_b, tag_map=DVC_TAG_MAP)
+    """Generate structured side-by-side comparison data for two runs in active project."""
+    return get_active_mlflow_adapter().get_run_comparison_matrix(run_id_a, run_id_b, tag_map=get_active_tag_map())
 
 
 def verify_run_artifacts(run) -> list:
-    """Verify DVC artifact hashes for a run against the workspace and DVC cache."""
-    return _core_verify_run_artifacts(DEFAULT_CONTEXT, run, tag_map=DVC_TAG_MAP, dvc_adapter=_dvc_adapter)
+    """Verify DVC artifact hashes for a run against the workspace and DVC cache of active project."""
+    return _core_verify_run_artifacts(
+        get_active_context(),
+        run,
+        tag_map=get_active_tag_map(),
+        dvc_adapter=get_active_dvc_adapter(),
+    )
 
 
 def get_git_status() -> dict:
-    """Get current Git status information."""
-    return _git_adapter.get_status()
+    """Get current Git status information for active project."""
+    return get_active_git_adapter().get_status()
 
 
 def get_dvc_status() -> str:
-    """Run dvc status and return output."""
-    return _dvc_adapter.get_status()
+    """Run dvc status and return output for active project."""
+    return get_active_dvc_adapter().get_status()
 
 
 def get_dvc_remote_status() -> str:
-    """Run dvc status -c and return output, clearly indicating remote sync status."""
-    return _dvc_adapter.get_remote_status()
+    """Run dvc status -c and return output for active project."""
+    return get_active_dvc_adapter().get_remote_status()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -435,8 +661,16 @@ def handle_inspect_run(run_id_prefix: str) -> str:
         "",
         "### 🗂️ DVC Artifact Hashes",
     ])
+    active_map = get_active_tag_map() or {}
     for tag_key, hash_val in details["dvc_hashes"].items():
-        artifact_path = DVC_TAG_MAP.get(tag_key, tag_key)
+        artifact_path = active_map.get(tag_key)
+        if not artifact_path:
+            for prefix in ("dvc.hash.", "artifact.hash.", "hash."):
+                if tag_key.startswith(prefix):
+                    artifact_path = tag_key[len(prefix):]
+                    break
+        if not artifact_path:
+            artifact_path = tag_key
         short = hash_val[:16] + "..." if len(hash_val) > 16 else hash_val
         lines.append(f"- `{artifact_path}`: `{short}`")
 

@@ -513,7 +513,49 @@ def render_sidebar(app_module):
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown('<div class="mls-section-label">Workspace</div>', unsafe_allow_html=True)
+        # ── Project Selector ─────────────────────────────────────────────────
+        st.markdown('<div class="mls-section-label">Active Project</div>', unsafe_allow_html=True)
+        registry_projects = app_module.get_registered_projects() if hasattr(app_module, "get_registered_projects") else {}
+        project_options = ["(default)"] + sorted(list(registry_projects.keys()))
+
+        current_alias = st.session_state.get("selected_project_alias", "(default)")
+        if current_alias not in project_options:
+            current_alias = "(default)"
+            st.session_state.selected_project_alias = "(default)"
+            if hasattr(app_module, "set_active_project"):
+                app_module.set_active_project(None)
+
+        current_idx = project_options.index(current_alias) if current_alias in project_options else 0
+
+        selected_alias = st.selectbox(
+            "Active Project",
+            options=project_options,
+            index=current_idx,
+            label_visibility="collapsed",
+            key="project_switcher_select",
+        )
+
+        if selected_alias != current_alias and hasattr(app_module, "set_active_project"):
+            target_alias = None if selected_alias == "(default)" else selected_alias
+            success, msg = app_module.set_active_project(target_alias)
+            if success:
+                st.session_state.selected_project_alias = selected_alias
+                st.session_state.pop("project_switch_error", None)
+                st.rerun()
+            else:
+                st.session_state.project_switch_error = msg
+                st.session_state.selected_project_alias = current_alias
+                st.session_state.project_switcher_select = current_alias
+                st.rerun()
+
+        if "project_switch_error" in st.session_state:
+            st.error(st.session_state.project_switch_error)
+
+        if hasattr(app_module, "get_active_context"):
+            active_ctx = app_module.get_active_context()
+            st.caption(f"📁 `{active_ctx.project_name}`")
+
+        st.markdown('<div class="mls-section-label" style="margin-top:0.5rem;">Workspace</div>', unsafe_allow_html=True)
 
         pages_workspace = [
             "◈  Overview",
