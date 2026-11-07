@@ -21,6 +21,28 @@ pip install -e .
 ml-lineage --help
 ```
 
+### CLI-First Project Onboarding & Discovery (`ml-lineage init`)
+
+ML Lineage Studio is designed as a **CLI-first** tool. An ML engineer can enter any existing machine learning project repository and initialize tracking in a single step:
+
+```bash
+# 1. Navigate to your existing ML project
+cd /path/to/customer-churn-model
+
+# 2. Initialize ML Lineage tracking (auto-detects Git, DVC, and MLflow)
+ml-lineage init
+
+# Non-interactive mode with custom alias:
+ml-lineage init --name churn-prod --yes
+```
+
+#### What `ml-lineage init` Does:
+1. **Detects Project Markers**: Identifies `.git`, `dvc.yaml`, `dvc.lock`, `params.yaml`, and active MLflow tracking databases.
+2. **Generates `.ml-lineage.yaml`**: Generates a safe project configuration without touching existing source code, models, datasets, or Git history.
+3. **Registers Globally**: Automatically adds the project to the centralized user registry (`~/.ml-lineage/registry.json`).
+4. **Instant Dashboard Availability**: The project is immediately visible in the Streamlit dashboard under the **Active Project** switcher (click **🔄 Refresh Projects** in the sidebar if the dashboard is already open).
+5. **CWD Upward Discovery**: Any CLI command (`status`, `doctor`, `runs`, `verify`, `history`) executed from within the project directory (or any subfolder) automatically detects and scopes to that project.
+
 ### Multi-Project Workflows
 
 ML Lineage Studio supports arbitrary external ML repositories without Wine-specific assumptions.
@@ -352,30 +374,33 @@ To safeguard active development and current models against unintentional data lo
 
 ## Automated Test Suite & Validation
 
-The test suite covers backend data helpers, chatbot command routing, session confirmation isolation, and real-data verification:
+The comprehensive automated test suite covers core lineage and recovery engines, multi-project context resolution, CLI-first onboarding, concurrency and atomic registry safety, and enterprise developer workflows:
 
 ```powershell
-# 1. Run the entire unit and integration test suite (31 tests):
-.venv\Scripts\python.exe -m unittest discover -s tests
+# 1. Run the entire pytest test suite (170+ tests):
+pytest tests/ -v
 
-# 2. Run the 24-point unit and mock test suite for chatbot recovery & isolation:
-.venv\Scripts\python.exe -m unittest tests/test_chatbot_recovery.py
+# 2. Run enterprise workflow validation tests (Phase 12):
+pytest tests/test_phase12_enterprise_workflows.py -v
 
-# 3. Run the 7-point dashboard data transformation and comparison test suite:
-.venv\Scripts\python.exe -m unittest tests/test_dashboard_data.py
+# 3. Run test assets model and training pipeline validation:
+pytest tests/test_phase12_test_assets.py -v
 
-# 4. Run the 36-point real-data validation runner against MLflow runs & historical Git commits:
-.venv\Scripts\python.exe tests/validate_real_data.py
+# 4. Run CLI initialization & discovery tests (Phase 11):
+pytest tests/test_phase11_cli_init.py -v
 
-# 5. Run real-data validation with Python UTF-8 mode:
-.venv\Scripts\python.exe -X utf8 tests/validate_real_data.py
+# 5. Run chatbot recovery & session isolation tests:
+pytest tests/test_chatbot_recovery.py -v
+
+# 6. Run real-data validation runner against live tracking data & Git commits:
+python tests/validate_real_data.py
 ```
 
 ### Verified Test Results
 
-- **Unit & Integration Suite**: 31 tests executed, **31 passed, 0 failed** in ~22s.
-- **Chatbot Recovery Suite**: 24 tests executed, **24 passed, 0 failed** (covers intent parsing, session isolation, confirmation rejections, and mock subprocess routing).
-- **Dashboard Data Suite**: 7 tests executed, **7 passed, 0 failed** (covers run resolution, metric delta formatting, and CSV export structures).
+- **Full Test Suite**: 170+ tests executed, **170+ passed, 0 failed, 2 skipped** (backward-compatible skipping).
+- **Enterprise Workflows (Phase 12)**: 15 tests covering new project setup, nested directory discovery, multi-project isolation, MLflow artifact verification, DVC pipeline detection, recovery safety/rollback, error handling, and thread-safe registry operations.
+- **Dedicated Test Assets**: Standalone synthetic model pipeline in `test_assets/` verified end-to-end (dataset generation, training, metrics, artifact tracking).
 - **Real-Data Validation Runner**: 36 automated checks executed against live SQLite tracking data (`mlflow.db`) and historical Git commits, **36 passed, 0 failed, 0 files modified** (strictly read-only).
 
 ---

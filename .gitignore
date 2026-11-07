@@ -25,3 +25,6 @@ Thumbs.db
 
 # Generated reports
 reports/
+
+# Local testing, model execution, and dry-run validation sandbox
+test_assets/

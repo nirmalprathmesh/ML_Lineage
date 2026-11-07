@@ -32,6 +32,7 @@ warnings.filterwarnings("ignore", category=Warning)
 logging.getLogger("mlflow").setLevel(logging.ERROR)
 logging.getLogger("alembic").setLevel(logging.ERROR)
 
+import re
 import click
 import yaml
 
@@ -39,14 +40,16 @@ import yaml
 # Some environments default to mixing stderr into stdout, causing result.stderr to be None.
 # We patch the CliRunner initializer to enforce mix_stderr=False.
 try:
+    import inspect
     from click.testing import CliRunner as _CliRunner
     _original_init = _CliRunner.__init__
-    def _patched_init(self, *args, **kwargs):
-        # Force mix_stderr=False unless explicitly overridden
-        if 'mix_stderr' not in kwargs:
-            kwargs['mix_stderr'] = False
-        _original_init(self, *args, **kwargs)
-    _CliRunner.__init__ = _patched_init
+    if "mix_stderr" in inspect.signature(_original_init).parameters:
+        def _patched_init(self, *args, **kwargs):
+            # Force mix_stderr=False unless explicitly overridden
+            if 'mix_stderr' not in kwargs:
+                kwargs['mix_stderr'] = False
+            _original_init(self, *args, **kwargs)
+        _CliRunner.__init__ = _patched_init
 except Exception:
     pass
 
@@ -258,7 +261,22 @@ def cmd_init(
     config_file = context.root / ".ml-lineage.yaml"
 
     project_name = alias or context.root.name
-    clean_alias = project_name.lower().replace(" ", "-")
+    # Normalize: lowercase, replace spaces/special chars with hyphens, strip extra hyphens
+    clean_alias = re.sub(r"[^a-z0-9_-]+", "-", project_name.lower().strip()).strip("-_")
+    if not clean_alias or not re.match(r"^[a-z0-9_-]{2,64}$", clean_alias):
+        state.fail(
+            f"Invalid project alias '{project_name}'. Must be 2-64 characters using lowercase letters, numbers, hyphens, and underscores.",
+            code=1,
+        )
+
+    # Validate registry collision before mutating filesystem
+    existing_entry = state.registry.get(clean_alias)
+    if existing_entry and not overwrite and Path(existing_entry.get("path", "")).resolve() != context.root.resolve():
+        state.fail(
+            f"Alias '{clean_alias}' is already registered to '{existing_entry.get('path')}'. "
+            f"Use --overwrite or specify a different alias (--name).",
+            code=1,
+        )
 
     # 1. Check if configuration already exists
     if config_file.is_file() and not overwrite:
@@ -291,6 +309,7 @@ def cmd_init(
             click.echo(f"  Project Name: {result['project_name']}")
             click.echo(f"  Project Root: {context.root}")
             click.echo(f"  Registered Alias: {clean_alias}")
+            click.echo(f"  Dashboard: Available under project switcher (click Refresh Projects).")
             click.echo("\nRun 'ml-lineage doctor' to check integration health.")
 
         state.output(result, _fmt)
@@ -390,9 +409,11 @@ def cmd_init(
         click.echo(f"\n[OK] Project successfully initialized at: {context.root}")
         click.echo(f"     Configuration written to: {config_file}")
         click.echo(f"     Registered alias: '{clean_alias}'")
+        click.echo(f"     Dashboard: Available under project switcher (click Refresh Projects).")
         click.echo("\nNext steps:")
         click.echo(f"  - Run 'ml-lineage doctor --project {clean_alias}' to verify integration health.")
         click.echo(f"  - Run 'ml-lineage status --project {clean_alias}' to view project tracking overview.")
+        click.echo(f"  - View in dashboard: Select '{clean_alias}' in the active project selector.")
 
     state.output(result, _fmt_success)
 

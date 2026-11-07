@@ -515,7 +515,35 @@ def render_sidebar(app_module):
 
         # ── Project Selector ─────────────────────────────────────────────────
         st.markdown('<div class="mls-section-label">Active Project</div>', unsafe_allow_html=True)
+
+        # Refresh projects button — re-reads the global registry to pick up
+        # projects that were added via `ml-lineage init` while the dashboard
+        # was already running.
+        if st.button("🔄 Refresh Projects", key="refresh_projects_btn", use_container_width=True):
+            # Clear any cached registry data and force re-read
+            st.session_state.pop("_cached_registry_projects", None)
+            st.session_state.pop("project_switch_error", None)
+            st.rerun()
+
         registry_projects = app_module.get_registered_projects() if hasattr(app_module, "get_registered_projects") else {}
+
+        # Mark unavailable projects (directory no longer exists)
+        _available_projects = {}
+        _unavailable_aliases: list[str] = []
+        for _alias, _meta in registry_projects.items():
+            from pathlib import Path as _Path
+            _proj_path = _Path(str(_meta.get("path", "")))
+            if _proj_path.is_dir():
+                _available_projects[_alias] = _meta
+            else:
+                _unavailable_aliases.append(_alias)
+
+        if _unavailable_aliases:
+            st.warning(
+                f"⚠ {len(_unavailable_aliases)} registered project(s) unavailable "
+                f"(directory not found): {', '.join(_unavailable_aliases)}"
+            )
+
         project_options = ["(default)"] + sorted(list(registry_projects.keys()))
 
         current_alias = st.session_state.get("selected_project_alias", "(default)")

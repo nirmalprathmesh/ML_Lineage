@@ -67,7 +67,7 @@ from ml_lineage.core.registry import ProjectRegistry
 from ml_lineage.core.verification import verify_run_artifacts as _core_verify_run_artifacts
 from ml_lineage.adapters.git import GitAdapter
 from ml_lineage.adapters.dvc import DVCAdapter
-from ml_lineage.adapters.mlflow import MLflowAdapter
+from ml_lineage.adapters.mlflow import MLflowAdapter, MLflowSchemaMismatchError
 
 DEFAULT_CONTEXT = ProjectContext.from_path(PROJECT_ROOT)
 _git_adapter = GitAdapter(DEFAULT_CONTEXT)
@@ -488,7 +488,22 @@ def run_recovery_subprocess(run_id: str, extra_args: list = None, timeout: int =
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_all_runs() -> list:
     """Fetch all MLflow runs from the active project's tracking store."""
-    return get_active_mlflow_adapter().fetch_all_runs()
+    try:
+        return get_active_mlflow_adapter().fetch_all_runs()
+    except MLflowSchemaMismatchError:
+        raise
+    except Exception as e:
+        err_msg = str(e)
+        if "out-of-date database schema" in err_msg or "found version" in err_msg:
+            m = re.search(r"found version\s+([a-f0-9]+).*?expected\s+([a-f0-9]+)", err_msg)
+            found = m.group(1) if m else None
+            expected = m.group(2) if m else None
+            raise MLflowSchemaMismatchError(
+                err_msg,
+                found_version=found,
+                expected_version=expected,
+            ) from e
+        raise
 
 
 def resolve_run(run_id_prefix: str):
@@ -863,7 +878,7 @@ def handle_lineage_report(run_id_prefix: str) -> str:
     if not run:
         return f"❌ No unique run found matching `{run_id_prefix}`. Use `list runs` to see available runs."
 
-    python_exe = os.path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe")
+    python_exe = get_python_executable()
     script_path = os.path.join(PROJECT_ROOT, "scripts", "lineage_report.py")
 
     try:
@@ -1183,6 +1198,29 @@ def route_message(user_input: str) -> str:
     )
 
 
+def render_schema_mismatch_banner(error: MLflowSchemaMismatchError) -> None:
+    """Render an actionable, sanitized error banner for database schema incompatibility."""
+    st.markdown('<div class="mls-page-title">⚠️ MLflow Tracking Incompatibility</div>', unsafe_allow_html=True)
+    st.error(
+        f"**Database Schema Mismatch:** The active MLflow tracking database requires an MLflow environment with matching schema support.\n\n"
+        f"- **Database Schema Version:** `{error.found_version or 'unknown'}`\n"
+        f"- **Installed MLflow Expected Schema:** `{error.expected_version or 'unknown'}`\n\n"
+        "---\n\n"
+        "### Actionable Resolution Steps\n\n"
+        "1. **Align Environment MLflow Version:**\n"
+        "   If you recently accessed this tracking store with a newer MLflow version, activate an environment with matching MLflow support or upgrade your environment:\n"
+        "   ```bash\n"
+        "   pip install --upgrade mlflow\n"
+        "   ```\n\n"
+        "2. **Manual Migration Policy:**\n"
+        "   If you intentionally upgraded MLflow and wish to migrate an older database, create a verified backup and run:\n"
+        "   ```bash\n"
+        "   mlflow db upgrade <database_uri>\n"
+        "   ```\n\n"
+        "> **Safety Guarantee:** ML Lineage Studio never modifies, migrates, or writes to tracking databases automatically on dashboard startup."
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Streamlit UI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1205,27 +1243,31 @@ def main():
     app_module = sys.modules[__name__]
     dashboard_views.render_sidebar(app_module)
 
+
     # ── View Routing ─────────────────────────────────────────────────────────
     page = st.session_state.current_page
 
-    if page == "Overview":
-        dashboard_views.render_overview(app_module)
-    elif page == "Experiments":
-        dashboard_views.render_experiments(app_module)
-    elif page == "Compare Runs":
-        dashboard_views.render_compare(app_module)
-    elif page == "Lineage Explorer":
-        dashboard_views.render_lineage(app_module)
-    elif page == "Artifacts":
-        dashboard_views.render_artifacts(app_module)
-    elif page == "Recovery Center":
-        dashboard_views.render_recovery(app_module)
-    elif page == "Chat Assistant":
-        dashboard_views.render_chat(app_module)
-    elif page == "System Health":
-        dashboard_views.render_system_status(app_module)
-    else:
-        dashboard_views.render_overview(app_module)
+    try:
+        if page == "Overview":
+            dashboard_views.render_overview(app_module)
+        elif page == "Experiments":
+            dashboard_views.render_experiments(app_module)
+        elif page == "Compare Runs":
+            dashboard_views.render_compare(app_module)
+        elif page == "Lineage Explorer":
+            dashboard_views.render_lineage(app_module)
+        elif page == "Artifacts":
+            dashboard_views.render_artifacts(app_module)
+        elif page == "Recovery Center":
+            dashboard_views.render_recovery(app_module)
+        elif page == "Chat Assistant":
+            dashboard_views.render_chat(app_module)
+        elif page == "System Health":
+            dashboard_views.render_system_status(app_module)
+        else:
+            dashboard_views.render_overview(app_module)
+    except MLflowSchemaMismatchError as e:
+        render_schema_mismatch_banner(e)
 
 
 if __name__ == "__main__":

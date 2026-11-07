@@ -11,9 +11,13 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
+
+# Global lock for thread-safe registry mutation across concurrent workers
+_REGISTRY_LOCK = threading.RLock()
 
 
 class RegistryError(Exception):
@@ -62,21 +66,26 @@ class ProjectRegistry:
         if not self.registry_file.exists():
             return {}
 
-        try:
-            with open(self.registry_file, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if not content:
-                    return {}
-                data = json.loads(content)
-                if not isinstance(data, dict):
-                    raise RegistryError(f"Registry root must be a JSON object, got {type(data).__name__}")
-                return data
-        except json.JSONDecodeError as jde:
-            raise RegistryError(f"Registry file at '{self.registry_file}' contains invalid JSON: {jde}")
-        except PermissionError as pe:
-            raise RegistryError(f"Permission denied reading registry at '{self.registry_file}': {pe}")
-        except Exception as e:
-            raise RegistryError(f"Failed to read registry at '{self.registry_file}': {e}")
+        for attempt in range(5):
+            try:
+                with open(self.registry_file, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if not content:
+                        return {}
+                    data = json.loads(content)
+                    if not isinstance(data, dict):
+                        raise RegistryError(f"Registry root must be a JSON object, got {type(data).__name__}")
+                    return data
+            except (PermissionError, json.JSONDecodeError) as e:
+                if attempt < 4:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                if isinstance(e, json.JSONDecodeError):
+                    raise RegistryError(f"Registry file at '{self.registry_file}' contains invalid JSON: {e}")
+                raise RegistryError(f"Permission denied reading registry at '{self.registry_file}': {e}")
+            except Exception as e:
+                raise RegistryError(f"Failed to read registry at '{self.registry_file}': {e}")
+        return {}
 
     def save(self, data: dict[str, dict[str, Any]]) -> None:
         """Safely persist registry data to disk using atomic replacement."""
@@ -95,11 +104,18 @@ class ProjectRegistry:
                 f.flush()
                 os.fsync(f.fileno())
 
-            # Replace target file atomically
-            if os.path.exists(self.registry_file):
-                os.replace(temp_file.name, self.registry_file)
-            else:
-                os.rename(temp_file.name, self.registry_file)
+            # Replace target file atomically (os.replace is atomic and replaces destination if it exists or creates if not)
+            # Retry briefly on Windows if another process/thread has a momentary file handle lock
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    os.replace(temp_file.name, self.registry_file)
+                    break
+                except (PermissionError, OSError) as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(0.05 * (attempt + 1))
+                    else:
+                        raise e
         except PermissionError as pe:
             if os.path.exists(temp_file.name):
                 try:
@@ -147,34 +163,35 @@ class ProjectRegistry:
         if not resolved_path.is_dir():
             raise RegistryError(f"Target project path does not exist or is not a directory: {resolved_path}")
 
-        data = self.load()
+        with _REGISTRY_LOCK:
+            data = self.load()
 
-        # Check for alias collision
-        if clean_alias in data and not overwrite:
-            existing = data[clean_alias]
-            if existing.get("path") != str(resolved_path):
-                raise RegistryConflictError(
-                    f"Alias '{clean_alias}' is already registered to '{existing.get('path')}'. "
-                    f"Use --overwrite or a different alias."
-                )
+            # Check for alias collision
+            if clean_alias in data and not overwrite:
+                existing = data[clean_alias]
+                if existing.get("path") != str(resolved_path):
+                    raise RegistryConflictError(
+                        f"Alias '{clean_alias}' is already registered to '{existing.get('path')}'. "
+                        f"Use --overwrite or a different alias."
+                    )
 
-        # Check for path collision under a different alias
-        for existing_alias, meta in data.items():
-            if existing_alias != clean_alias and meta.get("path") == str(resolved_path) and not overwrite:
-                raise RegistryConflictError(
-                    f"Path '{resolved_path}' is already registered under alias '{existing_alias}'."
-                )
+            # Check for path collision under a different alias
+            for existing_alias, meta in data.items():
+                if existing_alias != clean_alias and meta.get("path") == str(resolved_path) and not overwrite:
+                    raise RegistryConflictError(
+                        f"Path '{resolved_path}' is already registered under alias '{existing_alias}'."
+                    )
 
-        entry = {
-            "alias": clean_alias,
-            "path": str(resolved_path),
-            "description": description,
-            "registered_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
-        }
+            entry = {
+                "alias": clean_alias,
+                "path": str(resolved_path),
+                "description": description,
+                "registered_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+            }
 
-        data[clean_alias] = entry
-        self.save(data)
-        return entry
+            data[clean_alias] = entry
+            self.save(data)
+            return entry
 
     def unregister(self, alias: str) -> bool:
         """Remove a project from the registry by alias.
@@ -183,12 +200,13 @@ class ProjectRegistry:
             True if removed, False if alias was not found.
         """
         clean_alias = str(alias).strip().lower()
-        data = self.load()
-        if clean_alias in data:
-            del data[clean_alias]
-            self.save(data)
-            return True
-        return False
+        with _REGISTRY_LOCK:
+            data = self.load()
+            if clean_alias in data:
+                del data[clean_alias]
+                self.save(data)
+                return True
+            return False
 
     def get(self, alias: str) -> dict[str, Any] | None:
         """Retrieve project registration by alias."""

@@ -275,6 +275,32 @@ class ProjectContext:
     @property
     def python_executable(self) -> str:
         """Find the virtualenv Python interpreter for this project or fallback to sys.executable."""
+        # 1. Explicit environment variable override
+        env_py = os.environ.get("ML_LINEAGE_PYTHON")
+        if env_py and Path(env_py).is_file():
+            return str(Path(env_py).resolve())
+
+        # 2. Explicit configuration in .ml-lineage.yaml
+        if isinstance(self.config, dict):
+            cfg_py = self.config.get("python", {}).get("executable")
+            if cfg_py:
+                resolved_cfg_py = (self.root / cfg_py).resolve() if not Path(cfg_py).is_absolute() else Path(cfg_py)
+                if resolved_cfg_py.is_file():
+                    return str(resolved_cfg_py)
+
+        # 3. If currently executing in an active virtual environment that belongs to this project
+        # or matches the package root, prefer the active sys.executable
+        if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+            pkg_root = Path(__file__).resolve().parent.parent.parent
+            if self.root.resolve() == pkg_root.resolve():
+                return sys.executable
+            try:
+                if Path(sys.executable).resolve().is_relative_to(self.root.resolve()):
+                    return sys.executable
+            except (ValueError, AttributeError):
+                pass
+
+        # 4. Standard virtualenv candidates in target project
         candidates = [
             self.root / ".venv" / "Scripts" / "python.exe",
             self.root / ".venv" / "bin" / "python",

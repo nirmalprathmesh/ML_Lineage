@@ -32,6 +32,20 @@ if TYPE_CHECKING:
     from ml_lineage.core.context import ProjectContext
 
 
+class MLflowSchemaMismatchError(Exception):
+    """Raised when the tracking database schema does not match the installed MLflow version."""
+
+    def __init__(
+        self,
+        message: str,
+        found_version: str | None = None,
+        expected_version: str | None = None,
+    ):
+        super().__init__(message)
+        self.found_version = found_version
+        self.expected_version = expected_version
+
+
 class MLflowAdapter:
     """Provides project-scoped MLflow tracking queries and run analytics."""
 
@@ -40,8 +54,38 @@ class MLflowAdapter:
         self.tracking_uri = context.tracking_uri
 
     def get_client(self) -> MlflowClient:
-        """Create a new MlflowClient bound to this project's tracking URI."""
-        return MlflowClient(tracking_uri=self.tracking_uri)
+        """Create a new MlflowClient bound to this project's tracking URI.
+
+        Raises:
+            MLflowSchemaMismatchError: If the tracking database schema is incompatible with
+                the installed MLflow package.
+        """
+        if MlflowClient is None:
+            raise RuntimeError("mlflow package is not installed.")
+        try:
+            return MlflowClient(tracking_uri=self.tracking_uri)
+        except Exception as e:
+            err_msg = str(e)
+            if (
+                "out-of-date database schema" in err_msg
+                or "found version" in err_msg
+                or ("database schema" in err_msg.lower() and "expected" in err_msg.lower())
+            ):
+                import re
+
+                m = re.search(r"found version\s+([a-f0-9]+).*?expected\s+([a-f0-9]+)", err_msg)
+                found = m.group(1) if m else None
+                expected = m.group(2) if m else None
+                installed_ver = getattr(mlflow, "__version__", "unknown") if mlflow else "unknown"
+                raise MLflowSchemaMismatchError(
+                    f"MLflow database schema mismatch detected (database schema: {found or 'unknown'}, "
+                    f"installed MLflow expected: {expected or 'unknown'}).\n"
+                    f"The tracking database was created or updated with a different MLflow version than currently running ({installed_ver}).\n"
+                    f"To resolve, align your environment MLflow version or upgrade the database with 'mlflow db upgrade'.",
+                    found_version=found,
+                    expected_version=expected,
+                ) from e
+            raise
 
     def search_experiments(self) -> list:
         """List all experiments in the project's tracking store."""
