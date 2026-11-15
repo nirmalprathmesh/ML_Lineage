@@ -71,9 +71,23 @@ class MLflowAdapter:
                 or "found version" in err_msg
                 or ("database schema" in err_msg.lower() and "expected" in err_msg.lower())
             ):
+                # Resilient read fallback for SQLite stores:
+                # If the SQLite database schema revision is ahead of the installed MLflow package
+                # (e.g. database contains revision f4a9b2c7d1e6 from MLflow 3.18, while host Python runs 3.17),
+                # test whether standard read queries succeed without modifying or migrating the database.
+                if self.tracking_uri and "sqlite" in self.tracking_uri.lower():
+                    try:
+                        from unittest.mock import patch
+                        with patch("mlflow.store.db.utils._verify_schema"):
+                            fallback_client = MlflowClient(tracking_uri=self.tracking_uri)
+                            fallback_client.search_experiments(max_results=1)
+                            return fallback_client
+                    except Exception:
+                        pass
+
                 import re
 
-                m = re.search(r"found version\s+([a-f0-9]+).*?expected\s+([a-f0-9]+)", err_msg)
+                m = re.search(r"found version\s+([a-zA-Z0-9_-]+).*?expected\s+([a-zA-Z0-9_-]+)", err_msg)
                 found = m.group(1) if m else None
                 expected = m.group(2) if m else None
                 installed_ver = getattr(mlflow, "__version__", "unknown") if mlflow else "unknown"

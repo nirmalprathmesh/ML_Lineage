@@ -681,5 +681,52 @@ class TestGenericArtifactTagMapping(unittest.TestCase):
             self.assertFalse(v["is_lineage_verified"])
 
 
+class TestMLflowSchemaCompatibility(unittest.TestCase):
+    """Test resilient handling of MLflow database schema mismatches in MLflowAdapter."""
+
+    def test_01_sqlite_forward_compatible_schema_fallback(self):
+        """When an SQLite database has a forward-compatible revision, get_client provides fallback."""
+        from ml_lineage.adapters.mlflow import MLflowAdapter
+        from ml_lineage.core.context import ProjectContext
+        from mlflow.exceptions import MlflowException
+
+        ctx = ProjectContext.from_path(Path("D:/ML_CP"))
+        adapter = MLflowAdapter(ctx)
+
+        # Simulate first call to MlflowClient raising out-of-date schema
+        real_client = MagicMock()
+        real_client.search_experiments.return_value = []
+
+        call_count = [0]
+        def mock_client_init(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise MlflowException("Detected out-of-date database schema (found version f4a9b2c7d1e6, but expected dc11669786a5)")
+            return real_client
+
+        with patch("ml_lineage.adapters.mlflow.MlflowClient", side_effect=mock_client_init):
+            client = adapter.get_client()
+            self.assertEqual(client, real_client)
+            self.assertEqual(call_count[0], 2)
+
+    def test_02_non_sqlite_or_broken_schema_raises_mismatch_error(self):
+        """When a schema is genuinely broken, MLflowSchemaMismatchError is properly raised."""
+        from ml_lineage.adapters.mlflow import MLflowAdapter, MLflowSchemaMismatchError
+        from ml_lineage.core.context import ProjectContext
+        from mlflow.exceptions import MlflowException
+
+        ctx = ProjectContext.from_path(Path("D:/ML_CP"))
+        adapter = MLflowAdapter(ctx)
+
+        def mock_client_broken(*args, **kwargs):
+            raise MlflowException("Detected out-of-date database schema (found version broken_rev, but expected dc11669786a5)")
+
+        with patch("ml_lineage.adapters.mlflow.MlflowClient", side_effect=mock_client_broken):
+            with self.assertRaises(MLflowSchemaMismatchError) as cm:
+                adapter.get_client()
+            self.assertEqual(cm.exception.found_version, "broken_rev")
+            self.assertEqual(cm.exception.expected_version, "dc11669786a5")
+
+
 if __name__ == "__main__":
     unittest.main()
