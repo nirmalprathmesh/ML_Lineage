@@ -684,38 +684,87 @@ class TestGenericArtifactTagMapping(unittest.TestCase):
 class TestMLflowSchemaCompatibility(unittest.TestCase):
     """Test resilient handling of MLflow database schema mismatches in MLflowAdapter."""
 
-    def test_01_sqlite_forward_compatible_schema_fallback(self):
-        """When an SQLite database has a forward-compatible revision, get_client provides fallback."""
-        from ml_lineage.adapters.mlflow import MLflowAdapter
+    def test_01_readonly_client_proxy_enforcement(self):
+        """ReadOnlyMlflowClient transparently allows reads and programmatically blocks mutations."""
+        from ml_lineage.adapters.mlflow import ReadOnlyMlflowClient
+
+        mock_raw = MagicMock()
+        mock_raw.search_experiments.return_value = ["exp_ok"]
+        mock_raw.get_run.return_value = MagicMock(info=MagicMock(run_id="run_123"))
+
+        ro_client = ReadOnlyMlflowClient(mock_raw)
+
+        # Allowed read operations
+        self.assertEqual(ro_client.search_experiments(), ["exp_ok"])
+        self.assertEqual(ro_client.get_run("run_123").info.run_id, "run_123")
+
+        # Blocked mutating operations across prefixes
+        mutating_calls = [
+            ("create_run", ("0",)),
+            ("create_experiment", ("new_exp",)),
+            ("delete_run", ("run_123",)),
+            ("delete_experiment", ("0",)),
+            ("log_metric", ("run_123", "loss", 0.1)),
+            ("log_param", ("run_123", "lr", 0.01)),
+            ("log_artifact", ("run_123", "model.pkl")),
+            ("set_tag", ("run_123", "stage", "prod")),
+            ("set_experiment_tag", ("0", "team", "core")),
+            ("update_run", ("run_123", "FINISHED")),
+            ("restore_run", ("run_123",)),
+            ("restore_experiment", ("0",)),
+        ]
+        for method_name, args in mutating_calls:
+            with self.subTest(method=method_name):
+                fn = getattr(ro_client, method_name)
+                with self.assertRaises(PermissionError) as ctx:
+                    fn(*args)
+                self.assertIn("prohibited", str(ctx.exception))
+                self.assertIn("read-only", str(ctx.exception))
+
+    def test_02_sqlite_forward_compatible_schema_fallback_real_db(self):
+        """Under aligned MLflow, client connects natively; under schema mismatch, fallback provides ReadOnly client."""
+        from ml_lineage.adapters.mlflow import MLflowAdapter, ReadOnlyMlflowClient
         from ml_lineage.core.context import ProjectContext
+        from mlflow.tracking import MlflowClient as RealMlflowClient
         from mlflow.exceptions import MlflowException
 
-        ctx = ProjectContext.from_path(Path("D:/ML_CP"))
+        ctx = ProjectContext.from_path(PROJECT_ROOT)
         adapter = MLflowAdapter(ctx)
 
-        # Simulate first call to MlflowClient raising out-of-date schema
-        real_client = MagicMock()
-        real_client.search_experiments.return_value = []
+        # 1. Native access under aligned environment
+        native_client = adapter.get_client()
+        self.assertIsNotNone(native_client)
+        exps = native_client.search_experiments()
+        self.assertGreater(len(exps), 0)
+        self.assertIn("Default", [e.name for e in exps])
 
-        call_count = [0]
-        def mock_client_init(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise MlflowException("Detected out-of-date database schema (found version f4a9b2c7d1e6, but expected dc11669786a5)")
-            return real_client
+        # 2. Resilient fallback when initial construction raises schema mismatch
+        first_call = [True]
+        def mock_init_first_fail(*args, **kwargs):
+            if first_call[0]:
+                first_call[0] = False
+                raise MlflowException("Detected out-of-date database schema (found version future_rev, but expected f4a9b2c7d1e6)")
+            return RealMlflowClient(*args, **kwargs)
 
-        with patch("ml_lineage.adapters.mlflow.MlflowClient", side_effect=mock_client_init):
-            client = adapter.get_client()
-            self.assertEqual(client, real_client)
-            self.assertEqual(call_count[0], 2)
+        with patch("ml_lineage.adapters.mlflow.MlflowClient", side_effect=mock_init_first_fail):
+            fallback_adapter = MLflowAdapter(ctx)
+            fallback_client = fallback_adapter.get_client()
+            self.assertIsInstance(fallback_client, ReadOnlyMlflowClient)
 
-    def test_02_non_sqlite_or_broken_schema_raises_mismatch_error(self):
+            # Read queries succeed through proxy
+            self.assertGreater(len(fallback_client.search_experiments()), 0)
+
+            # Write operations are blocked by proxy
+            with self.assertRaises(PermissionError):
+                fallback_client.create_run(experiment_id=exps[0].experiment_id)
+
+    def test_03_non_sqlite_or_broken_schema_raises_mismatch_error(self):
         """When a schema is genuinely broken, MLflowSchemaMismatchError is properly raised."""
         from ml_lineage.adapters.mlflow import MLflowAdapter, MLflowSchemaMismatchError
         from ml_lineage.core.context import ProjectContext
         from mlflow.exceptions import MlflowException
 
-        ctx = ProjectContext.from_path(Path("D:/ML_CP"))
+        ctx = ProjectContext.from_path(PROJECT_ROOT)
         adapter = MLflowAdapter(ctx)
 
         def mock_client_broken(*args, **kwargs):
@@ -726,6 +775,30 @@ class TestMLflowSchemaCompatibility(unittest.TestCase):
                 adapter.get_client()
             self.assertEqual(cm.exception.found_version, "broken_rev")
             self.assertEqual(cm.exception.expected_version, "dc11669786a5")
+
+    def test_04_thread_safety_schema_fallback(self):
+        """Concurrent threads calling get_client operate safely without racing _verify_schema."""
+        import concurrent.futures
+        import mlflow.store.db.utils as db_utils
+        from ml_lineage.adapters.mlflow import MLflowAdapter
+        from ml_lineage.core.context import ProjectContext
+
+        ctx = ProjectContext.from_path(PROJECT_ROOT)
+        adapter = MLflowAdapter(ctx)
+        orig_verify = getattr(db_utils, "_verify_schema", None)
+
+        def worker():
+            c = adapter.get_client()
+            return len(c.search_experiments())
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(worker) for _ in range(8)]
+            results = [f.result() for f in futures]
+
+        self.assertEqual(len(results), 8)
+        self.assertTrue(all(r > 0 for r in results))
+        # Ensure _verify_schema was restored to original reference
+        self.assertIs(getattr(db_utils, "_verify_schema", None), orig_verify)
 
 
 if __name__ == "__main__":

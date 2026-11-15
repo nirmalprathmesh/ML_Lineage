@@ -411,7 +411,7 @@ def cmd_list_runs(args):
     """List recorded runs in MLflow tracking database."""
     uri = get_tracking_uri()
     mlflow.set_tracking_uri(uri)
-    client = MlflowClient()
+    client = _mlflow_adapter.get_client()
 
     exps = client.search_experiments()
     if args.experiment:
@@ -507,7 +507,7 @@ def main():
 
     uri = get_tracking_uri()
     mlflow.set_tracking_uri(uri)
-    client = MlflowClient()
+    client = _mlflow_adapter.get_client()
 
     run = resolve_mlflow_run(client, args.run_id)
     report = build_lineage_report(client, run)

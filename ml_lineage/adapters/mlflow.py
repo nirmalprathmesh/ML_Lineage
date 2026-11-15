@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,9 @@ os.environ["MLFLOW_DISABLE_AGENT_HINT"] = "1"
 os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
 logging.getLogger("mlflow").setLevel(logging.ERROR)
 logging.getLogger("alembic").setLevel(logging.ERROR)
+
+_SCHEMA_FALLBACK_LOCK = threading.RLock()
+_FALLBACK_READONLY_URIS: set[str] = set()
 
 # Attempt to import mlflow; if unavailable, defer error until used
 try:
@@ -30,6 +34,61 @@ from ml_lineage.wine import WINE_DVC_TAG_MAP
 
 if TYPE_CHECKING:
     from ml_lineage.core.context import ProjectContext
+
+
+class ReadOnlyMlflowClient:
+    """Enforced read-only proxy wrapper around an MlflowClient.
+
+    Permits read-only inspection, run queries, and metric fetching while
+    programmatically blocking any mutating operations (creates, updates,
+    deletions, log calls) to guarantee tracking database integrity when
+    operating in schema compatibility fallback mode.
+    """
+
+    _MUTATING_PREFIXES = (
+        "create_",
+        "delete_",
+        "log_",
+        "set_",
+        "update_",
+        "restore_",
+        "rename_",
+        "add_",
+        "remove_",
+        "link_",
+        "unlink_",
+        "detach_",
+        "copy_",
+        "register_",
+        "start_",
+        "end_",
+        "finalize_",
+        "transition_",
+        "refresh_",
+    )
+
+    def __init__(self, client: Any) -> None:
+        object.__setattr__(self, "_client", client)
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._client, name)
+        if callable(attr) and any(name.startswith(p) for p in self._MUTATING_PREFIXES):
+            def _blocked_mutation(*args: Any, **kwargs: Any) -> None:
+                raise PermissionError(
+                    f"Operation '{name}' is prohibited: MLflow client is operating "
+                    f"in strict read-only compatibility mode."
+                )
+            return _blocked_mutation
+        return attr
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_client":
+            object.__setattr__(self, "_client", value)
+        else:
+            setattr(self._client, name, value)
+
+    def __repr__(self) -> str:
+        return f"<ReadOnlyMlflowClient wrapping {self._client!r}>"
 
 
 class MLflowSchemaMismatchError(Exception):
@@ -63,7 +122,10 @@ class MLflowAdapter:
         if MlflowClient is None:
             raise RuntimeError("mlflow package is not installed.")
         try:
-            return MlflowClient(tracking_uri=self.tracking_uri)
+            raw_client = MlflowClient(tracking_uri=self.tracking_uri)
+            if self.tracking_uri and self.tracking_uri in _FALLBACK_READONLY_URIS:
+                return ReadOnlyMlflowClient(raw_client)
+            return raw_client
         except Exception as e:
             err_msg = str(e)
             if (
@@ -71,17 +133,26 @@ class MLflowAdapter:
                 or "found version" in err_msg
                 or ("database schema" in err_msg.lower() and "expected" in err_msg.lower())
             ):
-                # Resilient read fallback for SQLite stores:
+                # Resilient read-only fallback for SQLite stores:
                 # If the SQLite database schema revision is ahead of the installed MLflow package
                 # (e.g. database contains revision f4a9b2c7d1e6 from MLflow 3.18, while host Python runs 3.17),
                 # test whether standard read queries succeed without modifying or migrating the database.
+                # All mutations are strictly blocked via ReadOnlyMlflowClient proxy.
                 if self.tracking_uri and "sqlite" in self.tracking_uri.lower():
                     try:
-                        from unittest.mock import patch
-                        with patch("mlflow.store.db.utils._verify_schema"):
-                            fallback_client = MlflowClient(tracking_uri=self.tracking_uri)
-                            fallback_client.search_experiments(max_results=1)
-                            return fallback_client
+                        import mlflow.store.db.utils as db_utils
+                        with _SCHEMA_FALLBACK_LOCK:
+                            orig_verify = getattr(db_utils, "_verify_schema", None)
+                            if orig_verify is not None:
+                                db_utils._verify_schema = lambda engine: None
+                            try:
+                                fallback_client = MlflowClient(tracking_uri=self.tracking_uri)
+                                fallback_client.search_experiments(max_results=1)
+                                _FALLBACK_READONLY_URIS.add(self.tracking_uri)
+                                return ReadOnlyMlflowClient(fallback_client)
+                            finally:
+                                if orig_verify is not None:
+                                    db_utils._verify_schema = orig_verify
                     except Exception:
                         pass
 
